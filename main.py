@@ -599,8 +599,233 @@ SendRelease=no
                 
                 url = "http://cert-viva-local/Certs"
                 pyperclip.copy(url)
-                print(f"\nEnsure the jump server has Internet connectivity, then open your browser to visit {url}.")
-                print(f"(URL has been copied to clipboard)")
+                print(f"\nEnsure the jump server has Internet connectivity, then open your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL}.")
+                print(f"\nDownload the {Fore.CYAN}Agent Image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data there")
+            else:
+                print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
+        else:
+            print(f"{Fore.RED}Network configuration failed{Style.RESET_ALL}\n")
+
+class AgentConfigurator(BaseConfigurator):
+    def __init__(self):
+        super().__init__()
+        self.username = "root"
+        self.password = "vmware"
+        self.external_gateway = "192.168.4.7"
+        self.external_dns = "10.241.96.14"
+        self.internal_dns = "192.168.4.1"
+
+    def check_internet(self, ssh) -> bool:
+        """Check internet connectivity"""
+        print("\nVerifying Internet connectivity...")
+        try:
+            cmd = 'wget --spider --timeout=5 www.google.com'
+            stdin, stdout, stderr = ssh.exec_command(cmd)
+            exit_status = stdout.channel.recv_exit_status()
+            
+            if exit_status == 0:
+                return True
+            else:
+                error = stderr.read().decode()
+                print(f"{Fore.RED}Network check failed with error: {error}{Style.RESET_ALL}")
+                return False
+        except Exception as e:
+            print(f"{Fore.RED}Error checking internet connection: {str(e)}{Style.RESET_ALL}")
+            return False
+
+    def configure_external_network_config(self, ssh_client, external_ip: str) -> tuple:
+        """Configure external network settings"""
+        network_config = f"""[Match]
+Name=e*
+
+[Network]
+DHCP=no
+Address={external_ip}/22
+Gateway={self.external_gateway}
+DNS={self.external_dns}
+IP6AcceptRA=no
+
+[DHCPv4]
+SendRelease=no
+"""
+        try:
+            print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for external network...")
+            sftp = ssh_client.open_sftp()
+            with sftp.file('/etc/systemd/network/99-dhcp-en.network', 'w') as f:
+                f.write(network_config)
+            sftp.close()
+            
+            stdin, stdout, stderr = ssh_client.exec_command(
+                "sudo systemctl restart systemd-networkd"
+            )
+            
+            ssh_client.close()
+            
+            print("Waiting for network service to restart...")
+            time.sleep(10)
+            
+            new_ssh_client = self.ssh_connect(external_ip, self.username, self.password)
+            if new_ssh_client:
+                return True, new_ssh_client
+            return False, None
+        except Exception as e:
+            print(f"{Fore.RED}External network configuration error: {e}{Style.RESET_ALL}")
+            return False, None
+
+    def configure_internal_network_config(self, ssh_client, internal_ip: str) -> tuple:
+        """Configure internal network settings"""
+        network_config = f"""[Match]
+Name=e*
+
+[Network]
+DHCP=no
+Address={internal_ip}/22
+Gateway={self.external_gateway}
+DNS={self.internal_dns}
+IP6AcceptRA=no
+
+[DHCPv4]
+SendRelease=no
+"""
+        try:
+            print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for internal network...")
+            sftp = ssh_client.open_sftp()
+            with sftp.file('/etc/systemd/network/99-dhcp-en.network', 'w') as f:
+                f.write(network_config)
+            sftp.close()
+            
+            stdin, stdout, stderr = ssh_client.exec_command(
+                "sudo systemctl restart systemd-networkd"
+            )
+            
+            ssh_client.close()
+            
+            print("Waiting for network service to restart...")
+            time.sleep(10)
+            
+            new_ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
+            if new_ssh_client:
+                return True, new_ssh_client
+            return False, None
+        except Exception as e:
+            print(f"{Fore.RED}Internal network configuration error: {e}{Style.RESET_ALL}")
+            return False, None
+
+    def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
+        """Agent specific network configuration"""
+        # Agent specific implementation
+        pass
+
+    def configure(self):
+        print(
+        f"""{Fore.CYAN}
+ ___________________________________________________________________
+ Now configuring Agent...
+ To move forward, make sure you've already completed the following:
+    (1) Downloaded the Agent Image (.ova) and Runlist (.json) from VIVa
+    (2) Placed the Runlist (.json) in the current directory
+    (3) Deployed the Agent Image on TC
+    (4) Obtained the DHCP IP address of Agent from TC
+ ___________________________________________________________________{Style.RESET_ALL}
+    """
+        )
+
+        # 獲取內部 IP
+        while True:
+            internal_ip = input("Enter Agent IP address: ").strip()
+            if self.validate_ip(internal_ip):
+                if self.ping_check(internal_ip):
+                    break
+                else:
+                    print(f"{Fore.RED}Failed to ping IP{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+
+        # 建立 SSH 連接
+        ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
+        if not ssh_client:
+            return
+
+        # 檢查並傳送 Runlist.json
+        runlist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Runlist.json")
+        if not os.path.exists(runlist_path):
+            print(f"{Fore.YELLOW}Runlist.json not found in the current directory.{Style.RESET_ALL}")
+            while True:
+                response = input("Please place Runlist.json in the current directory to continue (y/n): ").strip().lower()
+                if response == 'y':
+                    if os.path.exists(runlist_path):
+                        break
+                    else:
+                        print(f"{Fore.RED}Runlist.json still not found. Please try again.{Style.RESET_ALL}")
+                elif response == 'n':
+                    print("Operation cancelled by user.")
+                    ssh_client.close()
+                    return
+                else:
+                    print(f"{Fore.YELLOW}Please enter 'y' or 'n'{Style.RESET_ALL}")
+        else:
+            # 檢查遠端目錄是否存在
+            try:
+                sftp = ssh_client.open_sftp()
+                try:
+                    sftp.stat('/vmware/input/Runlist.json')
+                    response = input("Runlist.json already exists on the remote host. Overwrite? (y/n): ").strip().lower()
+                    if response != 'y':
+                        print("Skipping file transfer...")
+                        sftp.close()
+                    else:
+                        sftp.put(runlist_path, '/vmware/input/Runlist.json')
+                        print(f"{Fore.GREEN}Runlist.json transferred successfully{Style.RESET_ALL}")
+                        sftp.close()
+                except FileNotFoundError:
+                    sftp.put(runlist_path, '/vmware/input/Runlist.json')
+                    print(f"{Fore.GREEN}Runlist.json transferred successfully{Style.RESET_ALL}")
+                    sftp.close()
+            except Exception as e:
+                print(f"{Fore.RED}Error transferring Runlist.json: {e}{Style.RESET_ALL}")
+                ssh_client.close()
+                return
+
+        # 獲取外部 IP
+        while True:
+            external_ip = input("Enter IP address (for Internet access): ").strip()
+            if not self.validate_ip(external_ip):
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+                continue
+            
+            if self.ping_check(external_ip):
+                print(f"{Fore.YELLOW}IP {external_ip} is already in use. Please choose another IP{Style.RESET_ALL}")
+                continue
+            break
+
+        # 配置外部網路
+        success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip)
+        if success and new_ssh_client:
+            print(f"{Fore.GREEN}External network configuration successful{Style.RESET_ALL}\n")
+            ssh_client = new_ssh_client
+            
+            if self.check_internet(ssh_client):
+                print(f"{Fore.GREEN}Internet connectivity check successful{Style.RESET_ALL}\n\n")
+
+                print("Running AgentLauncher...")
+                stdin, stdout, stderr = ssh_client.exec_command("AgentLauncher -i")
+                if stdout.channel.recv_exit_status() == 0:
+                    print(f"{Fore.GREEN}AgentLauncher executed successfully{Style.RESET_ALL}\n")
+                    
+                    success, new_ssh_client = self.configure_internal_network_config(
+                        ssh_client, internal_ip
+                    )
+                    if success and new_ssh_client:
+                        print(f"{Fore.GREEN}Internal network configuration successful{Style.RESET_ALL}\n")
+                        ssh_client = new_ssh_client
+                        ssh_client.close()
+                        
+                        print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
+                        print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
+                else:
+                    print(f"{Fore.RED}Failed to execute AgentLauncher{Style.RESET_ALL}\n")
             else:
                 print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
         else:
@@ -617,25 +842,26 @@ def show_menu():
 Please select an option:
 1. Configure SUT
 2. Configure VIVa
-3. Exit
+3. Configure Agent
+4. Exit
 
 """
     )
     while True:
-        choice = input("Enter your choice (1-3): ").strip()
-        if choice in ['1', '2', '3']:
+        choice = input("Enter your choice (1-4): ").strip()
+        if choice in ['1', '2', '3', '4']:
             return choice
 
 def main():
     while True:
         choice = show_menu()
         
-        if choice == '3':
+        if choice == '4':
             print("\nExiting...")
             break
             
         try:
-            configurator = SUTConfigurator() if choice == '1' else VIVaConfigurator()
+            configurator = SUTConfigurator() if choice == '1' else VIVaConfigurator() if choice == '2' else AgentConfigurator()
             configurator.configure()
         except KeyboardInterrupt:
             print("\n\nOperation cancelled by user.")
