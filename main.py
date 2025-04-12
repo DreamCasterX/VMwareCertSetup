@@ -10,6 +10,10 @@ from colorama import init, Fore, Style
 import time
 import pyperclip
 from abc import ABC, abstractmethod
+from pyVim.connect import SmartConnect, Disconnect
+from pyVmomi import vim
+import ssl
+from PCI import main as pci_main
 
 # Initialize colorama
 init()
@@ -45,13 +49,20 @@ class BaseConfigurator(ABC):
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         try:
+            # Set timeout to 5 seconds for connection attempt
             if key_path and os.path.exists(key_path):
-                client.connect(hostname, username=username, key_filename=key_path)
+                client.connect(hostname, username=username, key_filename=key_path, timeout=5)
             else:
-                client.connect(hostname, username=username, password=password)
+                client.connect(hostname, username=username, password=password, timeout=5)
             return client
+        except paramiko.AuthenticationException:
+            print(f"{Fore.RED}Authentication failed. Please check username and password.{Style.RESET_ALL}")
+            return None
+        except paramiko.SSHException as e:
+            print(f"{Fore.RED}SSH Connection Error: {str(e)}{Style.RESET_ALL}")
+            return None
         except Exception as e:
-            print(f"{Fore.RED}SSH Connection Error: {e}{Style.RESET_ALL}")
+            print(f"{Fore.RED}Connection Error: {str(e)}{Style.RESET_ALL}")
             return None
 
     # 主配置方法
@@ -214,11 +225,11 @@ class SUTConfigurator(BaseConfigurator):
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
- Now configuring SUT...
+ Prerequisites:
  To move forward, make sure you've already completed the following:
-    (1) Installed VMware ESXi on SUT
-    (2) Enabled SSH access on SUT
-    (3) Obtained the DHCP IP address of SUT
+    1. Installed VMware ESXi on SUT
+    2. Enabled SSH access on SUT
+    3. Obtained the DHCP IP address of SUT
  ___________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -509,11 +520,11 @@ SendRelease=no
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
- Now configuring VIVa...
+ Prerequisites:
  To move forward, make sure you've already completed the following:
-    (1) Downloaded the 'viva-xxxx.ova' from Broadcom TAP website
-    (2) Deployed the 'viva-xxxx.ova' on TC
-    (3) Obtained the DHCP IP address of VIVa from TC
+    1. Downloaded the 'viva-xxxx.ova' from Broadcom TAP website
+    2. Deployed the 'viva-xxxx.ova' on TC
+    3. Obtained the DHCP IP address of VIVa from TC
  ___________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -600,7 +611,7 @@ SendRelease=no
                 url = "http://cert-viva-local/Certs"
                 pyperclip.copy(url)
                 print(f"\nEnsure the jump server has Internet connectivity, then open your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL}.")
-                print(f"\nDownload the {Fore.CYAN}Agent Image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data there")
+                print(f"\nDownload the {Fore.CYAN}Agent image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data on the web UI")
             else:
                 print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
         else:
@@ -613,6 +624,7 @@ class AgentConfigurator(BaseConfigurator):
         self.password = "vmware"
         self.external_gateway = "192.168.4.7"
         self.external_dns = "10.241.96.14"
+        self.internal_gateway = "192.168.4.1"
         self.internal_dns = "192.168.4.1"
 
     def check_internet(self, ssh) -> bool:
@@ -643,10 +655,6 @@ DHCP=no
 Address={external_ip}/22
 Gateway={self.external_gateway}
 DNS={self.external_dns}
-IP6AcceptRA=no
-
-[DHCPv4]
-SendRelease=no
 """
         try:
             print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for external network...")
@@ -654,9 +662,10 @@ SendRelease=no
             with sftp.file('/etc/systemd/network/99-dhcp-en.network', 'w') as f:
                 f.write(network_config)
             sftp.close()
-            
+
+            # Agent無法使用sudo
             stdin, stdout, stderr = ssh_client.exec_command(
-                "sudo systemctl restart systemd-networkd"
+                "systemctl restart systemd-networkd"
             )
             
             ssh_client.close()
@@ -680,12 +689,8 @@ Name=e*
 [Network]
 DHCP=no
 Address={internal_ip}/22
-Gateway={self.external_gateway}
+Gateway={self.internal_gateway}
 DNS={self.internal_dns}
-IP6AcceptRA=no
-
-[DHCPv4]
-SendRelease=no
 """
         try:
             print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for internal network...")
@@ -720,71 +725,84 @@ SendRelease=no
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
- Now configuring Agent...
+ Prerequisites:
  To move forward, make sure you've already completed the following:
-    (1) Downloaded the Agent Image (.ova) and Runlist (.json) from VIVa
-    (2) Placed the Runlist (.json) in the current directory
-    (3) Deployed the Agent Image on TC
-    (4) Obtained the DHCP IP address of Agent from TC
+    1. Downloaded the Agent image (.ova) and Runlist (.json) from VIVa
+    2. Placed the runlist.json in the current directory
+    3. Deployed the agent image on TC
+    4. Obtained the DHCP IP address of Agent from TC
  ___________________________________________________________________{Style.RESET_ALL}
     """
         )
 
-        # 獲取內部 IP
+        # 獲取內部 IP 並建立 SSH 連接
+        ssh_client = None
         while True:
             internal_ip = input("Enter Agent IP address: ").strip()
             if self.validate_ip(internal_ip):
-                if self.ping_check(internal_ip):
+                # Agent預設關閉ICMP阻止外部ping請求，直接嘗試建立 SSH 連接，不進行 ping 檢查
+                ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
+                if ssh_client:
                     break
                 else:
-                    print(f"{Fore.RED}Failed to ping IP{Style.RESET_ALL}")
+                    print(f"{Fore.RED}Failed to connect to Agent. Please check the IP address and ensure Agent's SSH is enabled.{Style.RESET_ALL}")
             else:
                 print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
 
-        # 建立 SSH 連接
-        ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
         if not ssh_client:
             return
 
-        # 檢查並傳送 Runlist.json
-        runlist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Runlist.json")
+        # 檢查並傳送 runlist.json
+        current_dir = os.getcwd()
+        runlist_path = os.path.join(current_dir, "runlist.json")
+        print("\nTransferring runlist to Agent...")
         if not os.path.exists(runlist_path):
-            print(f"{Fore.YELLOW}Runlist.json not found in the current directory.{Style.RESET_ALL}")
-            while True:
-                response = input("Please place Runlist.json in the current directory to continue (y/n): ").strip().lower()
+            print(f"{Fore.YELLOW}runlist.json not found in the current directory.{Style.RESET_ALL}")
+        
+        while True:
+            if not os.path.exists(runlist_path):
+                while True:
+                    response = input("Please place runlist.json in the current directory to continue (y/n): ").strip().lower()
+                    if response in ['y', 'n']:
+                        break
+                
                 if response == 'y':
+                    # 重新檢查檔案是否存在
                     if os.path.exists(runlist_path):
                         break
-                    else:
-                        print(f"{Fore.RED}Runlist.json still not found. Please try again.{Style.RESET_ALL}")
                 elif response == 'n':
-                    print("Operation cancelled by user.")
                     ssh_client.close()
                     return
-                else:
-                    print(f"{Fore.YELLOW}Please enter 'y' or 'n'{Style.RESET_ALL}")
-        else:
-            # 檢查遠端目錄是否存在
+            else:
+                break
+
+        # 檢查遠端是否存在runlist.json
+        try:
+            sftp = ssh_client.open_sftp()
             try:
-                sftp = ssh_client.open_sftp()
-                try:
-                    sftp.stat('/vmware/input/Runlist.json')
-                    response = input("Runlist.json already exists on the remote host. Overwrite? (y/n): ").strip().lower()
-                    if response != 'y':
-                        print("Skipping file transfer...")
-                        sftp.close()
-                    else:
-                        sftp.put(runlist_path, '/vmware/input/Runlist.json')
-                        print(f"{Fore.GREEN}Runlist.json transferred successfully{Style.RESET_ALL}")
-                        sftp.close()
-                except FileNotFoundError:
-                    sftp.put(runlist_path, '/vmware/input/Runlist.json')
-                    print(f"{Fore.GREEN}Runlist.json transferred successfully{Style.RESET_ALL}")
+                sftp.stat('/vmware/input/runlist.json')
+                while True:
+                    response = input(f"{Fore.YELLOW}runlist.json already exists on the remote host. Overwrite? (y/n): {Style.RESET_ALL}").strip().lower()
+                    if response in ['y', 'n']:
+                        break
+                
+                if response != 'y':
+                    print("Skipping file transfer...\n")
                     sftp.close()
-            except Exception as e:
-                print(f"{Fore.RED}Error transferring Runlist.json: {e}{Style.RESET_ALL}")
-                ssh_client.close()
-                return
+                else:
+                    # Transfer file if user chooses to overwrite
+                    sftp.put(runlist_path, '/vmware/input/runlist.json')
+                    print(f"{Fore.GREEN}runlist.json transferred successfully{Style.RESET_ALL}\n\n")
+                    sftp.close()
+            except FileNotFoundError:
+                # Transfer file if it doesn't exist
+                sftp.put(runlist_path, '/vmware/input/runlist.json')
+                print(f"{Fore.GREEN}runlist.json transferred successfully{Style.RESET_ALL}\n\n")
+                sftp.close()
+        except Exception as e:
+            print(f"{Fore.RED}Error transferring runlist.json: {e}{Style.RESET_ALL}\n")
+            ssh_client.close()
+            return
 
         # 獲取外部 IP
         while True:
@@ -822,6 +840,10 @@ SendRelease=no
                         
                         print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
                         print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
+                        url = f"https://{internal_ip}/agent-ui/"
+                        pyperclip.copy(url)
+                        print(f"\nOpen your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
+            
                     else:
                         print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
                 else:
@@ -831,38 +853,307 @@ SendRelease=no
         else:
             print(f"{Fore.RED}Network configuration failed{Style.RESET_ALL}\n")
 
+class PciPassthruConfigurator(BaseConfigurator):
+    def __init__(self):
+        super().__init__()
+        self.host = "10.241.180.69"  # ESXi 主機 IP
+        self.user = "root"           # ESXi 使用者
+        self.password = "Admin!23"   # ESXi 密碼
+        self.si = None
+
+    def get_valid_input(self, prompt, input_type=str, default=None, min_value=None):
+        """獲取有效的用戶輸入"""
+        while True:
+            value = input(prompt)
+            if not value:  # 輸入不能是空白
+                if default is not None:
+                    return default
+                continue
+            try:
+                result = input_type(value)
+                if min_value is not None and result < min_value:
+                    print(f"{Fore.YELLOW}Value must be at least {min_value}{Style.RESET_ALL}")
+                    continue
+                return result
+            except ValueError:
+                print(f"{Fore.YELLOW}Please enter a valid {input_type.__name__}{Style.RESET_ALL}")
+
+    def test_connection(self, host, user, password):
+        """測試 ESXi 連線"""
+        try:
+            context = ssl._create_unverified_context()
+            si = SmartConnect(host=host, user=user, pwd=password, sslContext=context)
+            if si:
+                print(f"{Fore.GREEN}Successfully connected to ESXi host{Style.RESET_ALL}")
+                return True, si
+            return False, None
+        except Exception as e:
+            print(f"{Fore.RED}Failed to connect to ESXi host: {e}{Style.RESET_ALL}")
+            return False, None
+
+    def list_vms(self, si):
+        """列出ESXi主機上的所有VM, 按創建時間排序"""
+        try:
+            content = si.RetrieveContent()
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+            
+            # 獲取VM並記錄創建時間
+            vms_with_time = []
+            for vm in container.view:
+                # 使用VM的創建時間，如果沒有則使用最後修改時間
+                create_time = vm.config.createDate or vm.config.modified
+                vms_with_time.append((vm.name, create_time))
+            
+            container.Destroy()
+            
+            if not vms_with_time:
+                print(f"{Fore.YELLOW}No VMs found on this host{Style.RESET_ALL}")
+                return []
+            
+            # 按時間排序，最新的在最後
+            vms_with_time.sort(key=lambda x: x[1])
+            vm_names = [vm[0] for vm in vms_with_time]
+                
+            print(f"\nAvailable VMs (oldest to newest):")
+            for i, name in enumerate(vm_names, 1):
+                print(f"{i}) {name}")
+            return vm_names
+        except Exception as e:
+            print(f"{Fore.RED}Error listing VMs: {e}{Style.RESET_ALL}")
+            return []
+
+    def add_vm_options(self, si, vm_name):
+        """添加 PCI Passthrough 選項到 VM"""
+        try:
+            content = si.RetrieveContent()
+            
+            # 找到虛擬機
+            vm = None
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+            for managed_object in container.view:
+                if managed_object.name == vm_name:
+                    vm = managed_object
+                    break
+            container.Destroy()
+            
+            if not vm:
+                print(f"{Fore.RED}VM name: '{vm_name}' is not found{Style.RESET_ALL}")
+                return
+
+            # 找到主機系統
+            host = vm.runtime.host
+            
+            # 尋找 NVIDIA GPU PCI 設備
+            nvidia_device = None
+            for pci_dev in host.hardware.pciDevice:
+                if "NVIDIA" in pci_dev.vendorName:
+                    nvidia_device = pci_dev
+                    print(f"\nFound NVIDIA GPU:")
+                    print(f"  Device Name: {Fore.LIGHTCYAN_EX}{pci_dev.deviceName}{Style.RESET_ALL}")
+                    print(f"  Vendor Name: {Fore.LIGHTCYAN_EX}{pci_dev.vendorName}{Style.RESET_ALL}")
+                    print(f"  Device ID: {Fore.LIGHTCYAN_EX}{hex(pci_dev.deviceId)}{Style.RESET_ALL}")
+                    print(f"  Vendor ID: {Fore.LIGHTCYAN_EX}{hex(pci_dev.vendorId)}{Style.RESET_ALL}")
+                    print(f"  PCI ID: {Fore.LIGHTCYAN_EX}{pci_dev.id}{Style.RESET_ALL}\n")
+                    break
+            
+            if not nvidia_device:
+                print(f"{Fore.RED}No NVIDIA GPU found on the host{Style.RESET_ALL}")
+                return
+
+            # 啟用 PCI 設備的 passthrough
+            passthru_sys = host.configManager.pciPassthruSystem
+            if passthru_sys:
+                # 創建 passthrough 配置
+                config = vim.host.PciPassthruConfig()
+                config.id = nvidia_device.id
+                config.passthruEnabled = True
+                
+                try:
+                    # 更新 PCI passthrough 配置
+                    passthru_sys.UpdatePassthruConfig([config])
+                    print(f"{Fore.GREEN}Successfully updated PCI passthrough configuration{Style.RESET_ALL}")
+                except Exception as e:
+                    print(f"{Fore.RED}Failed to update PCI passthrough config: {e}{Style.RESET_ALL}")
+                    return
+            
+            try:
+                # 創建 VM 配置
+                vm_config_spec = vim.vm.ConfigSpec()
+                
+                # 添加 PCI passthrough 設備
+                pci_spec = vim.vm.device.VirtualDeviceSpec()
+                pci_spec.operation = vim.vm.device.VirtualDeviceSpec.Operation.add
+                
+                pci_device = vim.vm.device.VirtualPCIPassthrough()
+                pci_device.backing = vim.vm.device.VirtualPCIPassthrough.DeviceBackingInfo()
+                pci_device.backing.id = nvidia_device.id
+                pci_device.backing.deviceId = hex(nvidia_device.deviceId)[2:].zfill(4)
+                pci_device.backing.systemId = host.hardware.systemInfo.uuid
+                pci_device.backing.vendorId = nvidia_device.vendorId
+                
+                # 設置設備的鍵值
+                pci_device.key = -1  # 讓 vSphere 自動分配鍵值
+                
+                pci_spec.device = pci_device
+                
+                # 更新設備配置列表
+                vm_config_spec.deviceChange = [pci_spec]
+                
+                print(f"\nAttempting to add PCI device to VM {Fore.CYAN}'{vm_name}'{Style.RESET_ALL}...")
+                
+                # 重新配置 VM
+                task = vm.ReconfigVM_Task(spec=vm_config_spec)
+                
+                # 等待任務完成
+                while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                    pass
+                
+                if task.info.state == vim.TaskInfo.State.success:
+                    print(f"{Fore.GREEN}Successfully added PCI passthrough device to '{vm_name}'{Style.RESET_ALL}")
+                    
+                    # 添加 VM 選項
+                    try:
+                        vm_config_spec = vim.vm.ConfigSpec()
+                        vm_config_spec.extraConfig = [
+                            vim.option.OptionValue(key='pciHole.start', value='2048'),
+                            vim.option.OptionValue(key='pciPassthru.use64bitMMIO', value='TRUE'),
+                            vim.option.OptionValue(key='pciPassthru.64bitMMIOSizeGB', value='256')
+                        ]
+                        
+                        # 添加記憶體預留鎖定選項
+                        vm_config_spec.memoryReservationLockedToMax = True
+                        
+                        print(f"\nAdding VM options to {Fore.CYAN}'{vm_name}'{Style.RESET_ALL}...")
+                        
+                        # 重新配置 VM
+                        task = vm.ReconfigVM_Task(spec=vm_config_spec)
+                        
+                        # 等待任務完成
+                        while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                            pass
+                        
+                        if task.info.state == vim.TaskInfo.State.success:
+                            print(f"{Fore.GREEN}Successfully added VM options to '{vm_name}'{Style.RESET_ALL}")
+                        else:
+                            print(f"{Fore.RED}Failed to add VM options: {task.info.error}{Style.RESET_ALL}")
+                            
+                    except Exception as e:
+                        print(f"{Fore.RED}Error adding VM options: {e}{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.RED}Failed to add PCI passthrough device to VM: {task.info.error}{Style.RESET_ALL}")
+                    return
+                    
+            except Exception as e:
+                print(f"{Fore.RED}Error adding PCI device to VM: {e}{Style.RESET_ALL}")
+                return
+                
+        except Exception as e:
+            print(f"{Fore.RED}Error adding VM options: {e}{Style.RESET_ALL}")
+
+    def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
+        """PCI Passthrough 不需要網路配置"""
+        pass
+
+    def configure(self):
+        print(
+        f"""{Fore.CYAN}
+ ___________________________________________________________________
+ Prerequisites:
+ To move forward, make sure you've already completed the following:
+    1. Installed NVIDIA GPU on the target VM
+    2. Obtained the IP address of the target VM
+ ___________________________________________________________________{Style.RESET_ALL}
+    """
+        )
+
+        try:
+            while True:
+                host = self.get_valid_input("Enter Host IP address: ")
+                if host:
+                    # 測試連線
+                    connected, self.si = self.test_connection(host, self.user, self.password)
+                    if not connected:
+                        continue
+                    break
+            
+            # 列出可用的VM
+            vm_list = self.list_vms(self.si)
+            if vm_list:
+                while True:
+                    vm_input = input("\nEnter VM number or name (or 'q' to quit): ")
+                    if vm_input.lower() == 'q':
+                        break
+                    
+                    try:
+                        # 嘗試將輸入轉換為數字
+                        idx = int(vm_input) - 1
+                        if 0 <= idx < len(vm_list):
+                            self.vm_name = vm_list[idx]
+                            break
+                    except ValueError:
+                        # 如果輸入不是數字,直接使用輸入的名稱
+                        if vm_input in vm_list:
+                            self.vm_name = vm_input
+                            break
+                    
+                    print(f"{Fore.YELLOW}Invalid selection. Please try again.{Style.RESET_ALL}")
+                
+                if self.vm_name:
+                    self.add_vm_options(self.si, self.vm_name)
+                    
+
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}Program interrupted by user{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"\n{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
+        finally:
+            # 確保連接被正確關閉
+            if self.si:
+                Disconnect(self.si)
+
 def show_menu():
     print(
     r"""
- =====================================
- VMware Cert Auto Configuration Tool 
+ =======================================
+ VMware Cert Test Environment Setup Tool 
                  v1.0 
- =====================================
+ =======================================
 
 Please select an option:
-1. Configure SUT
-2. Configure VIVa
-3. Configure Agent
-4. Exit
+1) Config SUT
+2) Config VIVa
+3) Config Agent
+4) Add PCI Passthrough VM Options
+5) Exit
 
 """
     )
     while True:
-        choice = input("Enter your choice (1-4): ").strip()
-        if choice in ['1', '2', '3', '4']:
+        choice = input("Enter your choice (1-5): ").strip()
+        if choice in ['1', '2', '3', '4', '5']:
             return choice
 
 def main():
     while True:
         choice = show_menu()
         
-        if choice == '4':
+        if choice == '5':
             print("\nExiting...")
             break
             
         try:
-            configurator = SUTConfigurator() if choice == '1' else VIVaConfigurator() if choice == '2' else AgentConfigurator()
-            configurator.configure()
+            if choice == '1':
+                configurator = SUTConfigurator()
+                configurator.configure()
+            elif choice == '2':
+                configurator = VIVaConfigurator()
+                configurator.configure()
+            elif choice == '3':
+                configurator = AgentConfigurator()
+                configurator.configure()
+            elif choice == '4':
+                configurator = PciPassthruConfigurator()
+                configurator.configure()
         except KeyboardInterrupt:
             print("\n\nOperation cancelled by user.")
         except Exception as e:
