@@ -225,7 +225,7 @@ class SUTConfigurator(BaseConfigurator):
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
- Prerequisites:
+ <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Installed VMware ESXi on SUT
     2. Enabled SSH access on SUT
@@ -520,7 +520,7 @@ SendRelease=no
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
- Prerequisites:
+ <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Downloaded the 'viva-xxxx.ova' from Broadcom TAP website
     2. Deployed the 'viva-xxxx.ova' on TC
@@ -725,7 +725,7 @@ DNS={self.internal_dns}
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
- Prerequisites:
+ <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Downloaded the Agent image (.ova) and Runlist (.json) from VIVa
     2. Placed the runlist.json in the current directory
@@ -840,7 +840,7 @@ DNS={self.internal_dns}
                         
                         print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
                         print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
-                        url = f"https://{internal_ip}/agent-ui/"
+                        url = f"https://{internal_ip}/agent-ui"
                         pyperclip.copy(url)
                         print(f"\nOpen your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
             
@@ -1058,7 +1058,7 @@ class PciPassthruConfigurator(BaseConfigurator):
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
- Prerequisites:
+ <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Installed NVIDIA GPU on the target VM
     2. Obtained the IP address of the target VM
@@ -1159,7 +1159,7 @@ def main():
         except Exception as e:
             print(f"{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         
-        input("\n[press Enter to return to the main menu...]")
+        input("\n<press Enter to return to the main menu...>")
 
 if __name__ == "__main__":
     try:
