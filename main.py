@@ -359,6 +359,7 @@ class VIVaConfigurator(BaseConfigurator):
         self.external_dns = "10.241.96.14"
         self.internal_gateway = "192.168.4.1"
         self.internal_dns = "192.168.4.1"
+        self.subnet_mask = "22" # 255.255.252.0
 
     def check_internet(self, ssh) -> bool:
         """Check internet connectivity"""
@@ -402,7 +403,7 @@ Name=e*
 
 [Network]
 DHCP=no
-Address={external_ip}/22
+Address={external_ip}/{self.subnet_mask}
 Gateway={self.external_gateway}
 DNS={self.external_dns}
 IP6AcceptRA=no
@@ -455,7 +456,7 @@ Name=e*
 
 [Network]
 DHCP=no
-Address={internal_ip}/22
+Address={internal_ip}/{self.subnet_mask}
 Gateway={self.internal_gateway}
 DNS={self.internal_dns}
 IP6AcceptRA=no
@@ -560,16 +561,8 @@ SendRelease=no
         print(f"{Fore.GREEN}Hosts file configuration successful{Style.RESET_ALL}\n\n")
 
         # 獲取外部 IP
-        while True:
-            external_ip = input("Enter IP address (for Internet access): ").strip()
-            if not self.validate_ip(external_ip):
-                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
-                continue
-            
-            if self.ping_check(external_ip):
-                print(f"{Fore.YELLOW}IP {external_ip} is already in use. Please choose another IP{Style.RESET_ALL}")
-                continue
-            break
+        external_ip = internal_ip
+        print(f"\nUsing internal IP {Fore.CYAN}{external_ip}{Style.RESET_ALL} for Internet access")
 
         # 配置外部網路
         success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip)
@@ -626,6 +619,7 @@ class AgentConfigurator(BaseConfigurator):
         self.external_dns = "10.241.96.14"
         self.internal_gateway = "192.168.4.1"
         self.internal_dns = "192.168.4.1"
+        self.subnet_mask = "22" # 255.255.252.0
 
     def check_internet(self, ssh) -> bool:
         """Check internet connectivity"""
@@ -652,7 +646,7 @@ Name=e*
 
 [Network]
 DHCP=no
-Address={external_ip}/22
+Address={external_ip}/{self.subnet_mask}
 Gateway={self.external_gateway}
 DNS={self.external_dns}
 """
@@ -688,7 +682,7 @@ Name=e*
 
 [Network]
 DHCP=no
-Address={internal_ip}/22
+Address={internal_ip}/{self.subnet_mask}
 Gateway={self.internal_gateway}
 DNS={self.internal_dns}
 """
@@ -804,17 +798,9 @@ DNS={self.internal_dns}
             ssh_client.close()
             return
 
-        # 獲取外部 IP
-        while True:
-            external_ip = input("Enter IP address (for Internet access): ").strip()
-            if not self.validate_ip(external_ip):
-                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
-                continue
-            
-            if self.ping_check(external_ip):
-                print(f"{Fore.YELLOW}IP {external_ip} is already in use. Please choose another IP{Style.RESET_ALL}")
-                continue
-            break
+        # 直接使用內部 IP當作外部 IP
+        external_ip = internal_ip
+        print(f"\nUsing internal IP {Fore.CYAN}{external_ip}{Style.RESET_ALL} for Internet access")
 
         # 配置外部網路
         success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip)
@@ -856,7 +842,6 @@ DNS={self.internal_dns}
 class PciPassthruConfigurator(BaseConfigurator):
     def __init__(self):
         super().__init__()
-        self.host = "10.241.180.69"  # ESXi 主機 IP
         self.user = "root"           # ESXi 使用者
         self.password = "Admin!23"   # ESXi 密碼
         self.si = None
@@ -1070,6 +1055,9 @@ class PciPassthruConfigurator(BaseConfigurator):
             while True:
                 host = self.get_valid_input("Enter Host IP address: ")
                 if host:
+                    if not self.validate_ip(host):
+                        print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+                        continue
                     # 測試連線
                     connected, self.si = self.test_connection(host, self.user, self.password)
                     if not connected:
