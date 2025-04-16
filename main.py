@@ -13,7 +13,6 @@ from abc import ABC, abstractmethod
 from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim
 import ssl
-from PCI import main as pci_main
 
 # Initialize colorama
 init()
@@ -23,6 +22,37 @@ class BaseConfigurator(ABC):
     # 初始化SSH連接
     def __init__(self):
         self.ssh_client = None
+        self.si = None
+
+    def test_connection(self, host, user, password):
+        """測試 ESXi 連線"""
+        try:
+            context = ssl._create_unverified_context()
+            si = SmartConnect(host=host, user=user, pwd=password, sslContext=context)
+            if si:
+                print(f"{Fore.GREEN}Connected to ESXi host successfully{Style.RESET_ALL}\n")
+                return True, si
+            return False, None
+        except Exception as e:
+            print(f"{Fore.RED}Failed to connect to ESXi host: {e}{Style.RESET_ALL}")
+            return False, None
+
+    def get_valid_input(self, prompt, input_type=str, default=None, min_value=None):
+        """獲取有效的用戶輸入"""
+        while True:
+            value = input(prompt)
+            if not value:  # 輸入不能是空白
+                if default is not None:
+                    return default
+                continue
+            try:
+                result = input_type(value)
+                if min_value is not None and result < min_value:
+                    print(f"{Fore.YELLOW}Value must be at least {min_value}{Style.RESET_ALL}")
+                    continue
+                return result
+            except ValueError:
+                print(f"{Fore.YELLOW}Please enter a valid {input_type.__name__}{Style.RESET_ALL}")
 
     # 驗證IP地址格式
     def validate_ip(self, ip: str) -> bool:
@@ -76,6 +106,37 @@ class BaseConfigurator(ABC):
     def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
         """基礎網路配置方法，由子類別實作"""
         raise NotImplementedError("Subclasses must implement this method")  
+
+    def list_vms(self, si):
+        """列出ESXi主機上的所有VM, 按創建時間排序"""
+        try:
+            content = si.RetrieveContent()
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+            
+            # 獲取VM並記錄創建時間
+            vms_with_time = []
+            for vm in container.view:
+                # 使用VM的創建時間，如果沒有則使用最後修改時間
+                create_time = vm.config.createDate or vm.config.modified
+                vms_with_time.append((vm.name, create_time))
+            
+            container.Destroy()
+            
+            if not vms_with_time:
+                print(f"{Fore.YELLOW}No VMs found on this host{Style.RESET_ALL}")
+                return []
+            
+            # 按時間排序，最新的在最後
+            vms_with_time.sort(key=lambda x: x[1])
+            vm_names = [vm[0] for vm in vms_with_time]
+                
+            print(f"\nAvailable VMs on the target ESXi host (oldest to newest):")
+            for i, name in enumerate(vm_names, 1):
+                print(f"{i}) {name}")
+            return vm_names
+        except Exception as e:
+            print(f"{Fore.RED}Error listing VMs: {e}{Style.RESET_ALL}")
+            return []
 
 # SUT配置器類別
 class SUTConfigurator(BaseConfigurator):
@@ -844,68 +905,6 @@ class PciPassthruConfigurator(BaseConfigurator):
         super().__init__()
         self.user = "root"           # ESXi 使用者
         self.password = "Admin!23"   # ESXi 密碼
-        self.si = None
-
-    def get_valid_input(self, prompt, input_type=str, default=None, min_value=None):
-        """獲取有效的用戶輸入"""
-        while True:
-            value = input(prompt)
-            if not value:  # 輸入不能是空白
-                if default is not None:
-                    return default
-                continue
-            try:
-                result = input_type(value)
-                if min_value is not None and result < min_value:
-                    print(f"{Fore.YELLOW}Value must be at least {min_value}{Style.RESET_ALL}")
-                    continue
-                return result
-            except ValueError:
-                print(f"{Fore.YELLOW}Please enter a valid {input_type.__name__}{Style.RESET_ALL}")
-
-    def test_connection(self, host, user, password):
-        """測試 ESXi 連線"""
-        try:
-            context = ssl._create_unverified_context()
-            si = SmartConnect(host=host, user=user, pwd=password, sslContext=context)
-            if si:
-                print(f"{Fore.GREEN}Successfully connected to ESXi host{Style.RESET_ALL}")
-                return True, si
-            return False, None
-        except Exception as e:
-            print(f"{Fore.RED}Failed to connect to ESXi host: {e}{Style.RESET_ALL}")
-            return False, None
-
-    def list_vms(self, si):
-        """列出ESXi主機上的所有VM, 按創建時間排序"""
-        try:
-            content = si.RetrieveContent()
-            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
-            
-            # 獲取VM並記錄創建時間
-            vms_with_time = []
-            for vm in container.view:
-                # 使用VM的創建時間，如果沒有則使用最後修改時間
-                create_time = vm.config.createDate or vm.config.modified
-                vms_with_time.append((vm.name, create_time))
-            
-            container.Destroy()
-            
-            if not vms_with_time:
-                print(f"{Fore.YELLOW}No VMs found on this host{Style.RESET_ALL}")
-                return []
-            
-            # 按時間排序，最新的在最後
-            vms_with_time.sort(key=lambda x: x[1])
-            vm_names = [vm[0] for vm in vms_with_time]
-                
-            print(f"\nAvailable VMs (oldest to newest):")
-            for i, name in enumerate(vm_names, 1):
-                print(f"{i}) {name}")
-            return vm_names
-        except Exception as e:
-            print(f"{Fore.RED}Error listing VMs: {e}{Style.RESET_ALL}")
-            return []
 
     def add_vm_options(self, si, vm_name):
         """添加 PCI Passthrough 選項到 VM"""
@@ -1068,7 +1067,7 @@ class PciPassthruConfigurator(BaseConfigurator):
             vm_list = self.list_vms(self.si)
             if vm_list:
                 while True:
-                    vm_input = input("\nEnter VM number or name (or 'q' to quit): ")
+                    vm_input = input("\nEnter VM number or name (or 'q' to quit): ").strip()
                     if vm_input.lower() == 'q':
                         break
                     
@@ -1099,12 +1098,293 @@ class PciPassthruConfigurator(BaseConfigurator):
             if self.si:
                 Disconnect(self.si)
 
+class OVFManager(BaseConfigurator):
+    def __init__(self):
+        super().__init__()
+        self.user = "root"           # ESXi 使用者
+        self.password = "Admin!23"   # ESXi 密碼
+        self.datastore = "datastore1"
+        self.ovf_tool_path = r"C:\Program Files\VMware\VMware OVF Tool\ovftool.exe"
+
+    def check_ovf_tool(self) -> bool:
+        """檢查 OVF Tool 是否已安裝"""
+        print("\nVerifying if VMware OVF tool is installed...")
+        if os.path.exists(self.ovf_tool_path):
+            print(f"{Fore.GREEN}VMware OVF Tool has been installed{Style.RESET_ALL}\n")
+            return True
+        else:
+            print(f"{Fore.YELLOW}VMware OVF Tool is not installed{Style.RESET_ALL}\n")
+            return False
+
+    def list_ovf_files(self) -> list:
+        """列出當前目錄中的所有 OVF/OVA 文件"""
+        ovf_files = []
+        for file in os.listdir('.'):
+            if file.lower().endswith(('.ovf', '.ova')):
+                file_path = os.path.join(os.getcwd(), file)
+                create_time = os.path.getctime(file_path)
+                ovf_files.append((file, create_time))
+        
+        if not ovf_files:
+            return []
+        
+        # 按時間排序，最新的在最後
+        ovf_files.sort(key=lambda x: x[1])
+        return [file[0] for file in ovf_files]
+
+    def select_ovf_file(self) -> str:
+        """讓用戶選擇 OVF 文件"""
+        ovf_files = self.list_ovf_files()
+        
+        if not ovf_files:
+            print(f"{Fore.YELLOW}No OVF/OVA files found in current directory{Style.RESET_ALL}")
+            while True:
+                response = input("Please place OVF file in the current directory to continue (y/n): ").strip().lower()
+                if response in ['y', 'n']:
+                    break
+            
+            if response == 'y':
+                # 重新檢查檔案是否存在
+                ovf_files = self.list_ovf_files()
+                if not ovf_files:
+                    return None
+            else:
+                return None
+        
+        if len(ovf_files) == 1:
+            return ovf_files[0]
+        
+        print("\nAvailable OVF file(s) (oldest to newest):")
+        for i, file in enumerate(ovf_files, 1):
+            print(f"{i}) {file}")
+        
+        while True:
+            try:
+                choice = int(input("Enter file number: ")) - 1
+                if 0 <= choice < len(ovf_files):
+                    return ovf_files[choice]
+            except ValueError:
+                pass
+
+    def deploy_ovf(self, host: str, ovf_file: str) -> bool:
+        """部署 OVF 文件到 ESXi 主機"""
+        try:
+            print(f"\n\nDeploying OVF file to ESXi host...")
+            cmd = [
+                self.ovf_tool_path,
+                '--noSSLVerify',
+                '--acceptAllEulas',
+                '--X:logLevel=verbose',  # 顯示詳細日誌
+                f'--datastore={self.datastore}',
+                ovf_file,
+                f'vi://{self.user}:{self.password}@{host}'
+            ]
+            
+            # 使用 subprocess.Popen 來即時顯示輸出
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # 即時顯示輸出
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    # 如果是進度信息，在同一行顯示
+                    if 'Disk progress:' in output:
+                        if '99%' in output:
+                            print(f"\r{output.strip()}", end='', flush=True)
+                            print("\n", end='', flush=True)
+                        else:
+                            print(f"\r{output.strip()}", end='', flush=True)
+                    # 只顯示重要信息，過濾掉警告和重複的TransferCompleted
+                    elif 'Warning:' not in output and 'Invalid value' not in output:
+                        # 移除重複的TransferCompleted
+                        if 'Transfer Completed' in output:
+                            output = output.replace('Transfer CompletedTransferCompleted', 'Transfer Completed')
+                        print(output.strip())
+            
+            # 獲取返回碼
+            return_code = process.poll()
+            
+            if return_code == 0:
+                print(f"\n{Fore.GREEN}OVF deployment successful{Style.RESET_ALL}")
+                return True
+            else:
+                error = process.stderr.read()
+                print(f"{Fore.RED}OVF deployment failed: {error}{Style.RESET_ALL}")
+                return False
+        except Exception as e:
+            print(f"{Fore.RED}Error deploying OVF: {e}{Style.RESET_ALL}")
+            return False
+
+    def export_ovf(self, host: str, vm_name: str, output_name: str) -> bool:
+        """從 ESXi 主機導出 OVF 文件"""
+        try:
+            # 確保輸出檔案名以 .ova 結尾
+            if not output_name.lower().endswith('.ova'):
+                output_name += '.ova'
+            
+            output_path = os.path.join(os.getcwd(), output_name)
+            
+            # 檢查檔案是否已存在
+            if os.path.exists(output_path):
+                while True:
+                    response = input(f"{Fore.YELLOW}File '{output_name}' already exists. Overwrite? (y/n): {Style.RESET_ALL}").strip().lower()
+                    if response in ['y', 'n']:
+                        break
+                
+                if response != 'y':
+                    print(f"{Fore.YELLOW}Export cancelled{Style.RESET_ALL}")
+                    return False
+            
+            cmd = [
+                self.ovf_tool_path,
+                '--noSSLVerify',
+                '--acceptAllEulas',
+                '--overwrite',
+                '--X:logLevel=verbose',  # 顯示詳細日誌
+                f'vi://{self.user}:{self.password}@{host}/{vm_name}',
+                output_path
+            ]
+            
+            print(f"\n\nExporting OVF file from ESXi host...")
+            
+            # 使用 subprocess.Popen 來即時顯示輸出
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # 即時顯示輸出
+            while True:
+                output = process.stdout.readline()
+                if output == '' and process.poll() is not None:
+                    break
+                if output:
+                    # 如果是進度信息，在同一行顯示
+                    if 'Disk progress:' in output:
+                        if '99%' in output:
+                            print(f"\r{output.strip()}", end='', flush=True)
+                            print("\n", end='', flush=True)
+                        else:
+                            print(f"\r{output.strip()}", end='', flush=True)
+                    # 只顯示重要信息，過濾掉警告和重複的TransferCompleted
+                    elif 'Warning:' not in output and 'Invalid value' not in output:
+                        # 移除重複的TransferCompleted
+                        if 'Transfer Completed' in output:
+                            output = output.replace('Transfer CompletedTransferCompleted', 'Transfer Completed')
+                        print(output.strip())
+            
+            # 獲取返回碼
+            return_code = process.poll()
+            
+            if return_code == 0:
+                print(f"\n{Fore.GREEN}'{output_name}' exported successfully{Style.RESET_ALL}\n")
+                return True
+            else:
+                error = process.stderr.read()
+                print(f"{Fore.RED}OVF export failed: {error}{Style.RESET_ALL}\n")
+                return False
+        except Exception as e:
+            print(f"{Fore.RED}Error exporting OVF: {e}{Style.RESET_ALL}\n")
+            return False
+
+    def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
+        """OVF Manager 不需要網路配置"""
+        pass
+
+    def configure(self):
+
+        print(
+        f"""{Fore.CYAN}
+ ___________________________________________________________________
+ <Prerequisites>
+ To move forward, make sure you've already completed the following:
+    1. Installed 'VMware OVF Tool' on this machine (jump server)
+    2. Obtained the IP address of the target ESXi host
+    3. Placed the OVF (.ovf or .ova) file in the current directory (Deploy only)
+ ___________________________________________________________________{Style.RESET_ALL}
+    """
+        )
+
+        if not self.check_ovf_tool():
+            return
+
+        print("\n1) Deploy OVF\n2) Export OVF")
+        while True:
+            choice = input("Select an action (1-2): ").strip()
+            if choice in ['1', '2']:
+                break
+
+        try:
+            while True:
+                host = self.get_valid_input("\nEnter Host IP address: ")
+                if host:
+                    if not self.validate_ip(host):
+                        print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+                        continue
+                    # 測試連線
+                    connected, self.si = self.test_connection(host, self.user, self.password)
+                    if not connected:
+                        continue
+                    break
+
+            if choice == '1':
+                ovf_file = self.select_ovf_file()
+                if ovf_file:
+                    self.deploy_ovf(host, ovf_file)
+            else:
+                vm_list = self.list_vms(self.si)
+                if vm_list:
+                    while True:
+                        vm_input = input("\nEnter VM number or name (or 'q' to quit): ").strip()
+                        if vm_input.lower() == 'q':
+                            break
+                        
+                        try:
+                            # 嘗試將輸入轉換為數字
+                            idx = int(vm_input) - 1
+                            if 0 <= idx < len(vm_list):
+                                vm_name = vm_list[idx]
+                                break
+                        except ValueError:
+                            # 如果輸入不是數字,直接使用輸入的名稱
+                            if vm_input in vm_list:
+                                vm_name = vm_input
+                                break
+                        
+                        print(f"{Fore.YELLOW}Invalid selection. Please try again.{Style.RESET_ALL}")
+                    
+                    if vm_input.lower() != 'q':
+                        output_name = input("Enter output OVF file name: ").strip()
+                        if output_name:
+                            self.export_ovf(host, vm_name, output_name)
+
+        except KeyboardInterrupt:
+            print(f"\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"\n{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
+        finally:
+            if self.si:
+                Disconnect(self.si)
+
 def show_menu():
     print(
     r"""
  =======================================
  VMware Cert Test Environment Setup Tool 
-                 v1.0 
+                 v1.1 
  =======================================
 
 Please select an option:
@@ -1112,20 +1392,21 @@ Please select an option:
 2) Config VIVa
 3) Config Agent
 4) Add PCI Passthrough VM Options
-5) Exit
+5) Manage OVF
+6) Exit
 
 """
     )
     while True:
-        choice = input("Enter your choice (1-5): ").strip()
-        if choice in ['1', '2', '3', '4', '5']:
+        choice = input("Enter your choice (1-6): ").strip()
+        if choice in ['1', '2', '3', '4', '5', '6']:
             return choice
 
 def main():
     while True:
         choice = show_menu()
         
-        if choice == '5':
+        if choice == '6':
             print("\nExiting...")
             break
             
@@ -1141,6 +1422,9 @@ def main():
                 configurator.configure()
             elif choice == '4':
                 configurator = PciPassthruConfigurator()
+                configurator.configure()
+            elif choice == '5':
+                configurator = OVFManager()
                 configurator.configure()
         except KeyboardInterrupt:
             print("\n\nOperation cancelled by user.")
