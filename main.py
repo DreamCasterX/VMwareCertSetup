@@ -1429,7 +1429,7 @@ def main():
         except Exception as e:
             print(f"{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         
-        input("\n<press Enter to return to the main menu...>")
+        input(f"\n{Fore.LIGHTBLACK_EX}\n<press Enter to return to the main menu...>{Style.RESET_ALL}")
 
 if __name__ == "__main__":
     try:
