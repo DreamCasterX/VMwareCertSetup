@@ -1134,37 +1134,35 @@ class OVFManager(BaseConfigurator):
 
     def select_ovf_file(self) -> str:
         """讓用戶選擇 OVF 文件"""
-        ovf_files = self.list_ovf_files()
-        
-        if not ovf_files:
-            print(f"{Fore.YELLOW}No OVF/OVA files found in current directory{Style.RESET_ALL}")
-            while True:
-                response = input("Please place OVF file in the current directory to continue (y/n): ").strip().lower()
-                if response in ['y', 'n']:
-                    break
-            
-            if response == 'y':
-                # 重新檢查檔案是否存在
-                ovf_files = self.list_ovf_files()
-                if not ovf_files:
-                    return None
-            else:
-                return None
-        
-        if len(ovf_files) == 1:
-            return ovf_files[0]
-        
-        print("\nAvailable OVF file(s) (oldest to newest):")
-        for i, file in enumerate(ovf_files, 1):
-            print(f"{i}) {file}")
-        
         while True:
-            try:
-                choice = int(input("Enter file number: ")) - 1
-                if 0 <= choice < len(ovf_files):
-                    return ovf_files[choice]
-            except ValueError:
-                pass
+            ovf_files = self.list_ovf_files()
+            
+            if not ovf_files:
+                print(f"{Fore.YELLOW}No OVF/OVA files found in current directory{Style.RESET_ALL}")
+                while True:
+                    response = input("Please place OVF file in the current directory to continue (y/n): ").strip().lower()
+                    if response in ['y', 'n']:
+                        break
+                
+                if response == 'n':
+                    return None
+                # 如果選擇 'y'，繼續迴圈檢查檔案是否存在
+                continue
+            
+            if len(ovf_files) == 1:
+                return ovf_files[0]
+            
+            print("\nAvailable OVF file(s) (oldest to newest):")
+            for i, file in enumerate(ovf_files, 1):
+                print(f"{i}) {file}")
+            
+            while True:
+                try:
+                    choice = int(input("Enter file number: ")) - 1
+                    if 0 <= choice < len(ovf_files):
+                        return ovf_files[choice]
+                except ValueError:
+                    pass
 
     def deploy_ovf(self, host: str, ovf_file: str) -> bool:
         """部署 OVF 文件到 ESXi 主機"""
@@ -1198,7 +1196,7 @@ class OVFManager(BaseConfigurator):
                 if output:
                     # 如果是進度信息，在同一行顯示
                     if 'Disk progress:' in output:
-                        if '99%' in output:
+                        if '99%' in output or '100%' in output:
                             print(f"\r{output.strip()}", end='', flush=True)
                             print("\n", end='', flush=True)
                         else:
@@ -1274,7 +1272,7 @@ class OVFManager(BaseConfigurator):
                 if output:
                     # 如果是進度信息，在同一行顯示
                     if 'Disk progress:' in output:
-                        if '99%' in output:
+                        if '99%' in output or '100%' in output:
                             print(f"\r{output.strip()}", end='', flush=True)
                             print("\n", end='', flush=True)
                         else:
