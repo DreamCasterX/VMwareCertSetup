@@ -874,42 +874,27 @@ DNS={self.internal_dns}
 
                 print("Running AgentLauncher...")
                 stdin, stdout, stderr = ssh_client.exec_command("AgentLauncher -i")
-
-                # 追蹤已完成的docker image層數
-                completed_layers = 0
-                total_layers = 0
-
-                for line in stdout:
-                    line = line.strip()
-                    if "Pulling fs layer" in line:
-                        total_layers += 1
-                    elif "Pull complete" in line:
-                        completed_layers += 1
-                        print(f"\rProgress: {completed_layers}/{total_layers} layers completed", end='', flush=True)
-
-                # 最後打印一個換行
-                print()
-
-                # 檢查錯誤
-                for line in stderr:
-                    print(f"Error: {line.strip()}")
+                if stdout.channel.recv_exit_status() == 0:
+                    print(f"{Fore.GREEN}AgentLauncher executed successfully{Style.RESET_ALL}\n")
                     
-                success, new_ssh_client = self.configure_internal_network_config(
-                    ssh_client, internal_ip
-                )
-                if success and new_ssh_client:
-                    print(f"{Fore.GREEN}Internal network configuration successful{Style.RESET_ALL}\n")
-                    ssh_client = new_ssh_client
-                    ssh_client.close()
-                    
-                    print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
-                    print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
-                    url = f"https://{internal_ip}/agent-ui"
-                    pyperclip.copy(url)
-                    print(f"\nOpen your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
+                    success, new_ssh_client = self.configure_internal_network_config(
+                        ssh_client, internal_ip
+                    )
+                    if success and new_ssh_client:
+                        print(f"{Fore.GREEN}Internal network configuration successful{Style.RESET_ALL}\n")
+                        ssh_client = new_ssh_client
+                        ssh_client.close()
+                        
+                        print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
+                        print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
+                        url = f"https://{internal_ip}/agent-ui"
+                        pyperclip.copy(url)
+                        print(f"\nOpen your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
             
+                    else:
+                        print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
                 else:
-                    print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
+                    print(f"{Fore.RED}Failed to execute AgentLauncher{Style.RESET_ALL}\n")
             else:
                 print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
         else:
@@ -1082,7 +1067,7 @@ class PciPassthruConfigurator(BaseConfigurator):
             vm_list = self.list_vms(self.si)
             if vm_list:
                 while True:
-                    vm_input = input("\nEnter VM number (or 'q' to quit): ").strip()
+                    vm_input = input("\nEnter VM number or name (or 'q' to quit): ").strip()
                     if vm_input.lower() == 'q':
                         break
                     
@@ -1092,10 +1077,13 @@ class PciPassthruConfigurator(BaseConfigurator):
                         if 0 <= idx < len(vm_list):
                             self.vm_name = vm_list[idx]
                             break
-                        else:
-                            print(f"{Fore.YELLOW}Please enter a number between 1 and {len(vm_list)}{Style.RESET_ALL}")
                     except ValueError:
-                        print(f"{Fore.YELLOW}Please enter a valid number{Style.RESET_ALL}")
+                        # 如果輸入不是數字,直接使用輸入的名稱
+                        if vm_input in vm_list:
+                            self.vm_name = vm_input
+                            break
+                    
+                    print(f"{Fore.YELLOW}Invalid selection. Please try again.{Style.RESET_ALL}")
                 
                 if self.vm_name:
                     self.add_vm_options(self.si, self.vm_name)
@@ -1310,79 +1298,12 @@ class OVFManager(BaseConfigurator):
             print(f"{Fore.RED}Error exporting OVF: {e}{Style.RESET_ALL}\n")
             return False
 
-    def delete_vm(self, vm_name):
-        """刪除指定的虛擬機"""
-        try:
-            content = self.si.RetrieveContent()
-            
-            # 找到虛擬機
-            vm = None
-            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
-            for managed_object in container.view:
-                if managed_object.name == vm_name:
-                    vm = managed_object
-                    break
-            container.Destroy()
-            
-            if not vm:
-                print(f"{Fore.RED}VM '{vm_name}' not found{Style.RESET_ALL}")
-                return
-            
-            # 檢查VM電源狀態
-            if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
-                print(f"{Fore.YELLOW}VM '{vm_name}' is currently powered on{Style.RESET_ALL}")
-                while True:
-                    power_off = input("Would you like to power off the VM before deletion? (y/n): ").upper()
-                    if power_off == 'Y':
-                        print(f"Powering off VM '{vm_name}'...")
-                        task = vm.PowerOffVM_Task()
-                        while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
-                            pass
-                        if task.info.state != vim.TaskInfo.State.success:
-                            print(f"{Fore.RED}Failed to power off VM: {task.info.error}{Style.RESET_ALL}")
-                            return
-                        print(f"{Fore.GREEN}VM powered off successfully{Style.RESET_ALL}")
-                        break
-                    elif power_off == 'N':
-                        print(f"{Fore.YELLOW}Cannot delete a powered on VM. Operation cancelled.{Style.RESET_ALL}")
-                        return
-                    else:
-                        print(f"{Fore.YELLOW}Please enter Y or N{Style.RESET_ALL}")
-                        continue
-            
-            # 確認刪除
-            while True:
-                confirm = input(f"Are you sure you want to delete VM {Fore.CYAN}'{vm_name}'{Style.RESET_ALL}? (y/n): ").upper()
-                if confirm == 'Y':
-                    break
-                elif confirm == 'N':
-                    print(f"{Fore.YELLOW}Delete operation cancelled{Style.RESET_ALL}")
-                    return
-                else:
-                    print(f"{Fore.YELLOW}Please enter Y or N{Style.RESET_ALL}")
-                    continue
-                
-            # 執行刪除任務
-            task = vm.Destroy_Task()
-            print(f"\nDeleting VM '{vm_name}'...")
-            
-            # 等待任務完成
-            while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
-                pass
-            
-            if task.info.state == vim.TaskInfo.State.success:
-                print(f"{Fore.GREEN}VM '{vm_name}' deleted successfully{Style.RESET_ALL}")
-            else:
-                print(f"{Fore.RED}Failed to delete VM: {task.info.error}{Style.RESET_ALL}")
-                
-        except Exception as e:
-            print(f"{Fore.RED}Error deleting VM: {e}{Style.RESET_ALL}")
-
     def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
         """OVF Manager 不需要網路配置"""
         pass
 
     def configure(self):
+
         print(
         f"""{Fore.CYAN}
  ___________________________________________________________________
@@ -1390,7 +1311,7 @@ class OVFManager(BaseConfigurator):
  To move forward, make sure you've already completed the following:
     1. Installed 'VMware OVF Tool' on this machine (jump server)
     2. Obtained the IP address of the target ESXi host
-    3. Placed the OVF (.ovf or .ova) file in the current directory (for Deploy use)
+    3. Placed the OVF (.ovf or .ova) file in the current directory (Deploy only)
  ___________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -1398,10 +1319,10 @@ class OVFManager(BaseConfigurator):
         if not self.check_ovf_tool():
             return
 
-        print("\n1) Deploy OVF to ESXi\n2) Export OVF from ESXi\n3) Delete VM from ESXi")
+        print("\n1) Deploy OVF\n2) Export OVF")
         while True:
-            choice = input("\nEnter your choice (1-3): ").strip()
-            if choice in ['1', '2', '3']:
+            choice = input("Select an action (1-2): ").strip()
+            if choice in ['1', '2']:
                 break
 
         try:
@@ -1417,15 +1338,15 @@ class OVFManager(BaseConfigurator):
                         continue
                     break
 
-            if choice == '1': # Deploy OVF
+            if choice == '1':
                 ovf_file = self.select_ovf_file()
                 if ovf_file:
                     self.deploy_ovf(host, ovf_file)
-            elif choice == '2': # Export OVF
+            else:
                 vm_list = self.list_vms(self.si)
                 if vm_list:
                     while True:
-                        vm_input = input("\nEnter VM number (or 'q' to quit): ").strip()
+                        vm_input = input("\nEnter VM number or name (or 'q' to quit): ").strip()
                         if vm_input.lower() == 'q':
                             break
                         
@@ -1436,31 +1357,17 @@ class OVFManager(BaseConfigurator):
                                 vm_name = vm_list[idx]
                                 break
                         except ValueError:
-                            print(f"{Fore.YELLOW}Please enter a valid number{Style.RESET_ALL}")
+                            # 如果輸入不是數字,直接使用輸入的名稱
+                            if vm_input in vm_list:
+                                vm_name = vm_input
+                                break
+                        
+                        print(f"{Fore.YELLOW}Invalid selection. Please try again.{Style.RESET_ALL}")
                     
                     if vm_input.lower() != 'q':
                         output_name = input("Enter output OVF file name: ").strip()
                         if output_name:
                             self.export_ovf(host, vm_name, output_name)
-            elif choice == '3': # Delete VM
-                vm_list = self.list_vms(self.si)
-                if vm_list:
-                    while True:
-                        vm_input = input("\nEnter VM number (or 'q' to quit): ").strip()
-                        if vm_input.lower() == 'q':
-                            break
-                        
-                        try:
-                            # 嘗試將輸入轉換為數字
-                            idx = int(vm_input) - 1
-                            if 0 <= idx < len(vm_list):
-                                vm_name = vm_list[idx]
-                                break
-                        except ValueError:
-                            print(f"{Fore.YELLOW}Please enter a valid number{Style.RESET_ALL}")
-                    
-                    if vm_input.lower() != 'q':
-                        self.delete_vm(vm_name)
 
         except KeyboardInterrupt:
             print(f"\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
