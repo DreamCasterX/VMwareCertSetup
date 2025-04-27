@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim
 import ssl
+import json
 
 # Initialize colorama
 init()
@@ -214,7 +215,7 @@ class SUTConfigurator(BaseConfigurator):
         """根據VMware版本設定防火牆"""
         try:
             # Get VMware version
-            stdin, stdout, stderr = ssh_client.exec_command("vmware -r | awk -F ' ' '{print $3}' | cut -d '.' -f1")
+            stdin, stdout, stderr = ssh_client.exec_command("vmware -v | awk -F ' ' '{print $3}' | cut -d '.' -f1")
             version = stdout.read().decode().strip()
             
             if version == '9':
@@ -222,8 +223,7 @@ class SUTConfigurator(BaseConfigurator):
             elif version == '8':
                 cmd = '''esxcli network firewall set --enabled false
                         esxcli system wbem set -e 0
-                        esxcli system wbem set -e 1
-                        esxcli hardware trustedboot get'''
+                        esxcli system wbem set -e 1'''
             else:
                 print(f"{Fore.YELLOW}Unsupported VMware version: {version}{Style.RESET_ALL}")
                 return False
@@ -264,12 +264,15 @@ class SUTConfigurator(BaseConfigurator):
                 'Product Name': "esxcli hardware platform get | grep 'Product Name' | awk -F ': ' '{print $2}'",
                 'OS version': "vmware -r",
                 'Secure Boot state': "python3 /usr/lib/vmware/secureboot/bin/secureBoot.py -s",
+                'TPM status': "esxcli hardware trustedboot get | grep -i TPM | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                 'BMC IP': "esxcli hardware ipmi bmc get | grep 'IPv4Address' | awk -F ': ' '{print $2}'",
                 'OS IP': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $2}'",
                 'Submask': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $3}'",
                 'Gateway': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $6}'",
                 'DNS server': "esxcli network ip dns server list | awk -F ': ' '{print $2}'",
-                'DNS hostname': "esxcli system hostname get | grep 'Fully Qualified Domain Name' | awk -F ': ' '{print $2}'"
+                'DNS hostname': "esxcli system hostname get | grep 'Fully Qualified Domain Name' | awk -F ': ' '{print $2}'",
+                'Maintenance mode': "esxcli system maintenanceMode get",
+                "Connected to vCenter": "/etc/init.d/vpxa status | grep 'vpxa is running' > /dev/null&& echo 'Yes' || echo 'No'"
             }
 
             for label, command in commands.items():
@@ -284,7 +287,7 @@ class SUTConfigurator(BaseConfigurator):
 
     def configure(self):
         print(
-        f"""{Fore.CYAN}
+        f"""{Fore.YELLOW}
  ___________________________________________________________________
  <Prerequisites>
  To move forward, make sure you've already completed the following:
@@ -580,7 +583,7 @@ SendRelease=no
 
     def configure(self):
         print(
-        f"""{Fore.CYAN}
+        f"""{Fore.YELLOW}
  ___________________________________________________________________
  <Prerequisites>
  To move forward, make sure you've already completed the following:
@@ -778,15 +781,15 @@ DNS={self.internal_dns}
 
     def configure(self):
         print(
-        f"""{Fore.CYAN}
- ___________________________________________________________________
+        f"""{Fore.YELLOW}
+ _______________________________________________________________________
  <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Downloaded the Agent image (.ova) and Runlist (.json) from VIVa
     2. Placed the runlist.json in the current directory
     3. Deployed the agent image on TC
     4. Obtained the DHCP IP address of Agent from TC
- ___________________________________________________________________{Style.RESET_ALL}
+ _______________________________________________________________________{Style.RESET_ALL}
     """
         )
 
@@ -1055,7 +1058,7 @@ class PciPassthruConfigurator(BaseConfigurator):
 
     def configure(self):
         print(
-        f"""{Fore.CYAN}
+        f"""{Fore.YELLOW}
  ___________________________________________________________________
  <Prerequisites>
  To move forward, make sure you've already completed the following:
@@ -1384,14 +1387,14 @@ class OVFManager(BaseConfigurator):
 
     def configure(self):
         print(
-        f"""{Fore.CYAN}
- ___________________________________________________________________
+        f"""{Fore.YELLOW}
+ __________________________________________________________________________________
  <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Installed 'VMware OVF Tool' on this machine (jump server)
     2. Obtained the IP address of the target ESXi host
     3. Placed the OVF (.ovf or .ova) file in the current directory (for Deploy use)
- ___________________________________________________________________{Style.RESET_ALL}
+ __________________________________________________________________________________{Style.RESET_ALL}
     """
         )
 
@@ -1470,34 +1473,383 @@ class OVFManager(BaseConfigurator):
             if self.si:
                 Disconnect(self.si)
 
+class VCConfigurator(BaseConfigurator):
+    def __init__(self):
+        super().__init__()
+        self.default_TC_datastore = "datastore1"
+        self.default_TC_username = "root"
+        self.default_TC_host = "10.241.180.125"
+        self.default_TC_password = "Lenovo-123"   
+        self.default_VC_prefix = "22"
+        self.default_VC_gateway = "192.168.4.1"
+        self.default_VC_dns_servers = "192.168.4.1"
+        self.default_VC_root_password = "Admin!23"
+        self.default_VC_sso_password = "Admin!23"
+        self.default_VC_deployment_network = "All-Net網路-1GB-vmnic1"
+
+    def mount_iso(self, iso_path):
+        """掛載VCSA ISO並返回掛載的drive letter"""
+        mount_drive = None
+        result = subprocess.run(
+            f'powershell "Mount-DiskImage -ImagePath \'{iso_path}\' -PassThru | Get-Volume | Select-Object -ExpandProperty DriveLetter"', 
+            shell=True, 
+            capture_output=True, 
+            text=True
+        )
+        mount_drive = result.stdout.strip() + ":"
+        return mount_drive
+
+    def get_vcsa_deploy_path(self, mount_drive):
+        """獲取vcsa-deploy.exe的路徑"""
+        deploy_path = os.path.join(mount_drive + os.path.sep, "vcsa-cli-installer", "win32", "vcsa-deploy.exe")
+        if not os.path.exists(deploy_path):
+            raise FileNotFoundError(f"Unable to find vcsa-deploy tool: {deploy_path}")
+        return deploy_path
+
+    def create_json_template(self, esxi_host, esxi_username, esxi_password, template_path, vm_name, deployment_network):
+        """創建VCSA部署的JSON模板"""
+        config = {
+            "__version": "2.13.0",
+            "new_vcsa": {
+                "esxi": {
+                    "hostname": esxi_host,
+                    "username": esxi_username,
+                    "password": esxi_password,
+                    "deployment_network": deployment_network,
+                    "datastore": "datastore1"
+                },
+                "appliance": {
+                    "thin_disk_mode": True,
+                    "deployment_option": "medium",
+                    "name": vm_name
+                },
+                "network": {
+                    "ip_family": "ipv4",
+                    "mode": "static",
+                    "ip": "192.168.4.98",
+                    "prefix": "22",
+                    "gateway": "192.168.4.1",
+                    "dns_servers": ["192.168.4.1"],
+                    "system_name": "vc98.lenovo.com"
+                },
+                "os": {
+                    "password": "Admin!23",
+                    "ntp_servers": "192.168.4.1",
+                    "ssh_enable": True
+                },
+                "sso": {
+                    "password": "Admin!23",
+                    "domain_name": "vsphere.local",
+                    "first_instance": True
+                }
+            },
+            "ceip": {
+                "settings": {
+                    "ceip_enabled": False
+                }
+            }
+        }
+        
+        with open(template_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        return template_path
+
+    def deploy_vcenter(self, vcsa_deploy_path, template_path):
+        """使用vcsa-deploy工具部署vCenter"""
+        cmd = [
+            vcsa_deploy_path, 
+            'install',
+            template_path,
+            '--accept-eula',
+            '--no-ssl-certificate-verification',
+            '--acknowledge-ceip',
+        ]
+        
+        print(f"Executing deployment command: {' '.join(cmd)}")
+        
+        process = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
+        
+        last_message = None
+        for line in iter(process.stdout.readline, ''):
+            current_line = line.strip()
+            
+            if not current_line:
+                continue
+                
+            if current_line == last_message:
+                continue
+                
+            if 'OVF Tool' in line and 'Disk progress:' in line:
+                print(f"\r{current_line}", end='', flush=True)
+                if '99%' in line or '100%' in line:
+                    print("\n", end='', flush=True)
+            elif any(msg in line for msg in [
+                'VCSA Deployment Progress Report',
+                'required RPMs for the appliance',
+                'Task: Run firstboot scripts',
+                'VCSA Deployment is still running'
+            ]):
+                print(f"\r{current_line}", end='', flush=True)
+            elif any(service in line for service in [
+                'VMware Authentication Framework',
+                'VMware Identity Single Container Service',
+                'VMware Security Token Service',
+                'VMware vCenter-Services',
+                'VMware Certificate Authority Service',
+                'VMware vAPI Endpoint',
+                'VMware vCenter Server',
+                'VMware Service Control Agent',
+                'VMware vSphere Profile-Driven Storage Service',
+                'VMware Update Manager',
+                'VMware VSAN Health Service',
+                'VMware vService Manager',
+                'VMware Hybrid VC Service',
+                'VMware vStats Service',
+                'VMware Content Library Service',
+                'VMware Performance Charts',
+                'VMware Postgres',
+                'VMware License Service',
+                'VMware Trust Management Service'
+            ]):
+                print(f"\n{current_line}")
+            elif 'Error:' in line or 'error:' in line:
+                print(f"\n{Fore.RED}{current_line}{Style.RESET_ALL}")
+            elif 'successfully' in line.lower():
+                print(f"\n{Fore.GREEN}{current_line}{Style.RESET_ALL}")
+            else:
+                print(current_line)
+                
+            last_message = current_line
+        
+        process.wait()
+        
+        if process.returncode == 0:
+            print(f"\n{Fore.GREEN}vCenter deployment successful!{Style.RESET_ALL}")
+            return True
+        else:
+            print(f"\n{Fore.RED}vCenter deployment failed, exit code: {process.returncode}{Style.RESET_ALL}")
+            return False
+
+    def unmount_iso(self, mount_drive, iso_path):
+        """卸載ISO鏡像"""
+        subprocess.run(f'powershell "Dismount-DiskImage -ImagePath \'{iso_path}\'"', shell=True)
+
+    def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
+        """vCenter 不需要網路配置"""
+        pass
+
+    def configure(self):
+        print(
+        f"""{Fore.YELLOW}
+_________________________________________________________________________________________
+<Prerequisites>
+To move forward, make sure you've already completed the following:
+1. Downloaded the VCSA image (.iso) and placed it in the current directory
+2. Created a DNS hostname and IP for vCenter VM on DHCP server (ex: vc50 -> 192.168.4.50)
+_________________________________________________________________________________________{Style.RESET_ALL}
+"""
+        )
+                
+        # 檢查vCenter ISO是否存在
+        current_dir = os.getcwd()
+        iso_files = [f for f in os.listdir(current_dir) if f.lower().endswith('.iso')]
+
+        if not iso_files:
+            print(f"{Fore.YELLOW}VCSA ISO file not found in the current directory.{Style.RESET_ALL}")
+
+        while True:   
+            if not iso_files:
+                while True:
+                    response = input("Please place VCSA ISO file in the current directory to continue (y/n): ").strip().lower()
+                    if response in ['y', 'n']:
+                        break
+                
+                if response == 'y':
+                    iso_files = [f for f in os.listdir(current_dir) if f.lower().endswith('.iso')]
+                    if iso_files:
+                        break
+                elif response == 'n':
+                    return
+            else:
+                break
+
+        iso_path = os.path.join(current_dir, iso_files[0])
+
+        # 配置TC
+        while True:
+            esxi_host = input(f"Enter TC IP address <press Enter to accept default {Fore.CYAN}{self.default_TC_host}{Style.RESET_ALL}>: ").strip()
+            if esxi_host == "":
+                esxi_host = self.default_TC_host
+            if self.validate_ip(esxi_host):
+                break
+            else:
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+        esxi_username = input(f"Enter TC username <press Enter to accept default {Fore.CYAN}{self.default_TC_username}{Style.RESET_ALL}>: ").strip()
+        if esxi_username == "":
+            esxi_username = self.default_TC_username
+        esxi_password = input(f"Enter TC password <press Enter to accept default {Fore.CYAN}{self.default_TC_password}{Style.RESET_ALL}>: ").strip()
+        if esxi_password == "":
+            esxi_password = self.default_TC_password
+        esxi_datastore = input(f"Enter TC datastore <press Enter to accept default {Fore.CYAN}{self.default_TC_datastore}{Style.RESET_ALL}>: ").strip()
+        if esxi_datastore == "":
+            esxi_datastore = self.default_TC_datastore
+
+        print("")
+
+        # 配置vCenter
+        while True:
+            vm_name = input(f"Enter vCenter VM name: ").strip()
+            if vm_name:
+                break
+        
+        network_config = {}
+        while True:
+            network_config['ip'] = input(f"Enter vCenter IP address: ").strip()
+            if self.validate_ip(network_config['ip']):
+                break
+            else:
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+
+        suggested_system_name = f"vc{network_config['ip'].split('.')[-1]}.lenovo.com"
+        network_config['system_name'] = input(f"Enter vCenter system name <press Enter to accept {Fore.CYAN}{suggested_system_name}{Style.RESET_ALL}>: ").strip()
+        if network_config['system_name'] == "":
+            network_config['system_name'] = suggested_system_name
+        
+        network_config['prefix'] = input(f"Enter vCenter prefix <press Enter to accept default {Fore.CYAN}{self.default_VC_prefix}{Style.RESET_ALL}>: ").strip()
+        if network_config['prefix'] == "":
+            network_config['prefix'] = self.default_VC_prefix
+        
+        while True:
+            network_config['gateway'] = input(f"Enter vCenter gateway <press Enter to accept default {Fore.CYAN}{self.default_VC_gateway}{Style.RESET_ALL}>: ").strip()
+            if network_config['gateway'] == "":
+                network_config['gateway'] = self.default_VC_gateway
+            if self.validate_ip(network_config['gateway']):
+                break
+            else:
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+        
+        while True:
+            dns_servers = input(f"Enter vCenter DNS server <press Enter to accept default {Fore.CYAN}{self.default_VC_dns_servers}{Style.RESET_ALL}>: ").strip()
+            if dns_servers == "":
+                dns_servers = self.default_VC_dns_servers
+            if self.validate_ip(dns_servers):
+                break
+            else:
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+        network_config['dns_servers'] = [server.strip() for server in dns_servers.split(',')]
+
+        deployment_network = input(f"Enter vCenter deployment network <press Enter to accept default {Fore.CYAN}{self.default_VC_deployment_network}{Style.RESET_ALL}>: ").strip()
+        if deployment_network == "":
+            deployment_network = self.default_VC_deployment_network
+
+        root_password = input(f"Enter vCenter root password <press Enter to accept default {Fore.CYAN}{self.default_VC_root_password}{Style.RESET_ALL}>: ").strip()
+        if root_password == "":
+            root_password = self.default_VC_root_password
+        sso_password = input(f"Enter vCenter SSO password <press Enter to accept default {Fore.CYAN}{self.default_VC_sso_password}{Style.RESET_ALL}>: ").strip()
+        if sso_password == "":
+            sso_password = self.default_VC_sso_password
+        
+        deployment_size = "medium"
+        template_path = os.path.join(os.getcwd(), "vcsa_deployment.json")
+        
+        mount_drive = None
+        deployment_success = False
+        try:
+            print("\n\nMounting VCSA ISO...")
+            print(f"vCenter ISO file: {iso_path}")
+            mount_drive = self.mount_iso(iso_path)
+            print(f"Mounted drive: {mount_drive}")
+            
+            vcsa_deploy_path = self.get_vcsa_deploy_path(mount_drive)
+            
+            print("Creating deployment template...")
+            template = self.create_json_template(esxi_host, esxi_username, esxi_password, template_path, vm_name, deployment_network)
+            
+            with open(template_path, 'r') as f:
+                config = json.load(f)
+            
+            config['new_vcsa']['network']['ip'] = network_config['ip']
+            config['new_vcsa']['network']['prefix'] = network_config['prefix']
+            config['new_vcsa']['network']['gateway'] = network_config['gateway']
+            config['new_vcsa']['network']['dns_servers'] = network_config['dns_servers']
+            config['new_vcsa']['network']['system_name'] = network_config['system_name']
+            
+            config['new_vcsa']['os']['password'] = root_password
+            config['new_vcsa']['sso']['password'] = sso_password
+            config['new_vcsa']['appliance']['deployment_option'] = deployment_size
+            
+            with open(template_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            print(f"{Fore.GREEN}Deployment template saved to: {template_path}{Style.RESET_ALL}\n\n")
+            
+            while True:
+                confirmation = input("Are you ready to deploy vCenter to TC? (y/n): ").strip().lower()
+                if confirmation in ['y', 'n']:
+                    break
+            
+            if confirmation == 'y':
+                deployment_success = self.deploy_vcenter(vcsa_deploy_path, template_path)
+            else:
+                print("Deployment canceled")
+        
+        except Exception as e:
+            print(f"Error: {e}")
+            deployment_success = False
+        
+        finally:
+            if mount_drive:
+                print("\n\nUnmounting ISO...")
+                self.unmount_iso(mount_drive, iso_path)
+            
+            if deployment_success:
+                print(f"\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
+                
+                url_management = f"https://{network_config['system_name']}:5480"
+                url_vcsa = f"https://{network_config['system_name']}"
+                pyperclip.copy(url_management)
+                print(f"\nEnsure the jump server switched to the vCenter network (192.168.x.x), then open your browser to visit the following URLs:")
+                print(f"\n   - vCenter Server Management UI: {Fore.CYAN}{url_management}{Style.RESET_ALL}")
+                print(f"\n   - vCenter Client UI: {Fore.CYAN}{url_vcsa}{Style.RESET_ALL}")
+                print(f"\nLogin with user name: {Fore.CYAN}administrator@vsphere.local{Style.RESET_ALL} and password: {Fore.CYAN}{sso_password}{Style.RESET_ALL}\n")
+
+
 def show_menu():
     print(
     r"""
  =======================================
  VMware Cert Test Environment Setup Tool 
-                 v1.1 
+                 v1.2 
  =======================================
 
 Please select an option:
 1) Config SUT
 2) Config VIVa
 3) Config Agent
-4) Add PCI Passthrough VM Options
-5) Manage OVF
-6) Exit
+4) Config vCenter
+5) Add PCI Passthrough VM Options
+6) Manage OVF/VM
+7) Exit
 
 """
     )
     while True:
-        choice = input("Enter your choice (1-6): ").strip()
-        if choice in ['1', '2', '3', '4', '5', '6']:
+        choice = input("Enter your choice (1-7): ").strip()
+        if choice in ['1', '2', '3', '4', '5', '6', '7']:
             return choice
 
 def main():
     while True:
         choice = show_menu()
         
-        if choice == '6':
+        if choice == '7':
             print("\nExiting...")
             break
             
@@ -1512,9 +1864,12 @@ def main():
                 configurator = AgentConfigurator()
                 configurator.configure()
             elif choice == '4':
-                configurator = PciPassthruConfigurator()
+                configurator = VCConfigurator()
                 configurator.configure()
             elif choice == '5':
+                configurator = PciPassthruConfigurator()
+                configurator.configure()
+            elif choice == '6':
                 configurator = OVFManager()
                 configurator.configure()
         except KeyboardInterrupt:
