@@ -260,29 +260,39 @@ class SUTConfigurator(BaseConfigurator):
     def display_system_info(self, ssh_client):
         """顯示 ESXi 主機系統資訊"""
         try:
-            commands = {
-                'Product Name': "esxcli hardware platform get | grep 'Product Name' | awk -F ': ' '{print $2}'",
-                'OS version': "vmware -r",
-                'Secure Boot state': "python3 /usr/lib/vmware/secureboot/bin/secureBoot.py -s",
-                'TPM status': "esxcli hardware trustedboot get | grep -i TPM | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
-                'BMC IP': "esxcli hardware ipmi bmc get | grep 'IPv4Address' | awk -F ': ' '{print $2}'",
-                'OS IP': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $2}'",
-                'Submask': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $3}'",
-                'Gateway': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $6}'",
-                'DNS server': "esxcli network ip dns server list | awk -F ': ' '{print $2}'",
-                'DNS hostname': "esxcli system hostname get | grep 'Fully Qualified Domain Name' | awk -F ': ' '{print $2}'",
-                'Maintenance mode': "esxcli system maintenanceMode get",
-                "Connected to vCenter": "/etc/init.d/vpxa status | grep 'vpxa is running' > /dev/null&& echo 'Yes' || echo 'No'"
-            }
+            sections = [
+                ("System Information", {
+                    'Product Name': "esxcli hardware platform get | grep 'Product Name' | awk -F ': ' '{print $2}'",
+                    'OS version': "vmware -r",
+                    'BMC IP': "esxcli hardware ipmi bmc get | grep 'IPv4Address' | awk -F ': ' '{print $2}'",
+                }),
+                ("Security Information", {
+                    'Secure Boot': "python3 /usr/lib/vmware/secureboot/bin/secureBoot.py -s",
+                    'TPM': "esxcli hardware trustedboot get | grep -i TPM | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
+                    'Firewall': "esxcli network firewall get | grep 'Enabled' | awk -F ': ' '{print $2}' | sed 's/true/On/;s/false/Off/'",
+                }),
+                ("Network Information", {
+                    'OS IP': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $2}'",
+                    'Submask': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $3}'",
+                    'Gateway': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $6}'",
+                    'DNS server': "esxcli network ip dns server list | awk -F ': ' '{print $2}'",
+                    'DNS hostname': "esxcli system hostname get | grep 'Fully Qualified Domain Name' | awk -F ': ' '{print $2}'",
+                }),
+                ("Managing State", {
+                    'Maintenance mode': "esxcli system maintenanceMode get",
+                    "Connected to vCenter": "/etc/init.d/vpxa status | grep 'vpxa is running' > /dev/null&& echo 'Yes' || echo 'No'"
+                })
+            ]
 
-            for label, command in commands.items():
-                stdin, stdout, stderr = ssh_client.exec_command(command)
-                result = stdout.read().decode().strip()
-                print(f"{label}: {Fore.YELLOW}{result}{Style.RESET_ALL}")
-            
+            for section_name, commands in sections:
+                print(f"\n------------- {section_name} -------------")
+                for label, command in commands.items():
+                    stdin, stdout, stderr = ssh_client.exec_command(command)
+                    result = stdout.read().decode().strip()
+                    print(f"{label}: {Fore.CYAN}{result}{Style.RESET_ALL}")
             return True
         except Exception as e:
-            print(f"{Fore.RED}Error getting system information: {e}{Style.RESET_ALL}")
+            print(f"{Fore.RED}Error getting SUT information: {e}{Style.RESET_ALL}")
             return False
 
     def configure(self):
@@ -322,8 +332,7 @@ class SUTConfigurator(BaseConfigurator):
             return
 
         # 顯示當前系統資訊
-        print("\n\nGetting the current system information...")
-        print("-----------------------------------------")
+        print("\n\nGetting the current SUT info...")
         self.display_system_info(ssh_client)
 
         # 獲取網路配置詳細資訊
@@ -405,8 +414,7 @@ class SUTConfigurator(BaseConfigurator):
             return
 
         # 顯示更新後的系統資訊
-        print("\nGetting the updated system information...")
-        print("-----------------------------------------")
+        print("\nGetting the updated SUT info...")
         self.display_system_info(ssh_client)
         ssh_client.close()
 
@@ -1693,9 +1701,13 @@ ________________________________________________________________________________
         esxi_username = input(f"Enter TC username <press Enter to accept default {Fore.CYAN}{self.default_TC_username}{Style.RESET_ALL}>: ").strip()
         if esxi_username == "":
             esxi_username = self.default_TC_username
-        esxi_password = input(f"Enter TC password <press Enter to accept default {Fore.CYAN}{self.default_TC_password}{Style.RESET_ALL}>: ").strip()
-        if esxi_password == "":
-            esxi_password = self.default_TC_password
+        esxi_password = input(f"Enter TC password: ").strip()
+
+        # TC預設密碼保留隱私
+        # esxi_password = input(f"Enter TC password <press Enter to accept default {Fore.CYAN}{self.default_TC_password}{Style.RESET_ALL}>: ").strip()
+        # if esxi_password == "":
+        #     esxi_password = self.default_TC_password
+        
         esxi_datastore = input(f"Enter TC datastore <press Enter to accept default {Fore.CYAN}{self.default_TC_datastore}{Style.RESET_ALL}>: ").strip()
         if esxi_datastore == "":
             esxi_datastore = self.default_TC_datastore
@@ -1834,7 +1846,7 @@ Please select an option:
 2) Config VIVa
 3) Config Agent
 4) Config vCenter
-5) Add PCI Passthrough VM Options
+5) Add PCI Passthrough VM Options (NVIDIA GPU)
 6) Manage OVF/VM
 7) Exit
 
