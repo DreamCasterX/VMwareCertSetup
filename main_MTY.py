@@ -269,6 +269,8 @@ class SUTConfigurator(BaseConfigurator):
                 }),
                 ("Security Information", {
                     'Secure Boot': "python3 /usr/lib/vmware/secureboot/bin/secureBoot.py -s",
+                    # 解除強制SB方法: esxcli system settings encryption set --require-secure-boot=F 再 /bin/backup.sh 0
+                    'Secure boot enforcement': "esxcli system settings encryption get  | grep 'Require Secure Boot' | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                     'TPM': "esxcli hardware trustedboot get | grep -i TPM | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                     'Firewall': "esxcli network firewall get | grep 'Enabled' | awk -F ': ' '{print $2}' | sed 's/true/On/;s/false/Off/'",
                 }),
@@ -304,7 +306,7 @@ class SUTConfigurator(BaseConfigurator):
  To move forward, make sure you've already completed the following:
     1. Installed VMware ESXi on SUT and set the password to "Passw0rd!"
     2. Enabled SSH access on SUT
-    3. Obtained the DHCP IP address of SUT
+    3. Obtained the local DHCP IP address (192.168.x.x) of SUT
  ___________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -339,7 +341,7 @@ class SUTConfigurator(BaseConfigurator):
         # 獲取網路配置詳細資訊
         print("\n")
         while True:
-            static_ip = input("Set a new IP: ").strip()
+            static_ip = input("Set a new static IP: ").strip()
             if not self.validate_ip(static_ip):
                 print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
                 continue
@@ -433,7 +435,7 @@ class VIVaConfigurator(BaseConfigurator):
         self.external_dns = "10.241.96.14"
         self.internal_gateway = "192.168.4.1"
         self.internal_dns = "192.168.4.1"
-        self.subnet_mask = "22" # 255.255.252.0
+        self.subnet_mask = "24" # 255.255.255.0
 
     def check_internet(self, ssh) -> bool:
         """Check internet connectivity"""

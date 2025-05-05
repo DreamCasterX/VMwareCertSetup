@@ -265,11 +265,14 @@ class SUTConfigurator(BaseConfigurator):
                     'Product Name': "esxcli hardware platform get | grep 'Product Name' | awk -F ': ' '{print $2}'",
                     'OS version': "vmware -r",
                     'BMC IP': "esxcli hardware ipmi bmc get | grep 'IPv4Address' | awk -F ': ' '{print $2}'",
+                    'Hyper-Threading': "esxcli hardware cpu global get | grep 'Hyperthreading Enabled' | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                 }),
                 ("Security Information", {
                     'Secure Boot': "python3 /usr/lib/vmware/secureboot/bin/secureBoot.py -s",
+                    # 解除強制SB方法: esxcli system settings encryption set --require-secure-boot=F 再 /bin/backup.sh 0
+                    'Secure boot enforcement': "esxcli system settings encryption get  | grep 'Require Secure Boot' | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                     'TPM': "esxcli hardware trustedboot get | grep -i TPM | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
-                    'Firewall': "esxcli network firewall get | grep 'Enabled' | awk -F ': ' '{print $2}' | sed 's/true/On/;s/false/Off/'",
+                    'Firewall': "esxcli network firewall get | grep 'Enabled' | awk -F ': ' '{print $2}' | sed 's/true/On/;s/false/Off/'",  
                 }),
                 ("Network Information", {
                     'OS IP': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $2}'",
@@ -303,7 +306,7 @@ class SUTConfigurator(BaseConfigurator):
  To move forward, make sure you've already completed the following:
     1. Installed VMware ESXi on SUT
     2. Enabled SSH access on SUT
-    3. Obtained the DHCP IP address of SUT
+    3. Obtained the local DHCP IP address (192.168.x.x) of SUT
  ___________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -338,7 +341,7 @@ class SUTConfigurator(BaseConfigurator):
         # 獲取網路配置詳細資訊
         print("\n")
         while True:
-            static_ip = input("Set a new IP: ").strip()
+            static_ip = input("Set a new static IP: ").strip()
             if not self.validate_ip(static_ip):
                 print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
                 continue
@@ -1832,13 +1835,170 @@ ________________________________________________________________________________
                 print(f"\n   - vCenter Client UI: {Fore.CYAN}{url_vcsa}{Style.RESET_ALL}")
                 print(f"\nLogin with user name: {Fore.CYAN}administrator@vsphere.local{Style.RESET_ALL} and password: {Fore.CYAN}{sso_password}{Style.RESET_ALL}\n")
 
+class ResultLogCopier(BaseConfigurator):
+    def __init__(self):
+        super().__init__()
+        self.username = "root"
+        self.password = "vmware"
+
+    def get_latest_directory(self, ssh_client, path):
+        """獲取指定路徑下最新的目錄"""
+        try:
+            stdin, stdout, stderr = ssh_client.exec_command(f"ls -t {path}")
+            directories = stdout.read().decode().strip().split('\n')
+            if directories and directories[0]:
+                return directories[0]
+            return None
+        except Exception as e:
+            print(f"{Fore.RED}Error getting latest directory: {e}{Style.RESET_ALL}")
+            return None
+
+    def sanitize_filename(self, name):
+        # Windows 不允許 : ? * | < > \\ / "作為資料夾名稱, 用底線代替
+        return re.sub(r'[:?*|<>\\/\"]', '_', name)
+
+    def list_test_cases(self, ssh_client, path):
+        """列出測試案例目錄並讓用戶選擇（依據目錄內最新檔案的修改時間由舊到新）"""
+        try:
+            # 取得每個目錄下最新檔案的修改時間，並排序
+            cmd = (
+                f"for d in {path}/*/; do "
+                "t=$(find \"$d\" -type f -printf '%T@\\n' 2>/dev/null | sort -n | tail -1); "
+                "if [ -n \"$t\" ]; then echo \"$t $d\"; fi; "
+                "done | sort -n"
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(cmd)
+            lines = stdout.read().decode().strip().split('\n')
+            dirs = []
+            for line in lines:
+                if line.strip():
+                    # line: 'timestamp /results/xxx/yyy/zzz/'
+                    parts = line.strip().split(' ', 1)
+                    if len(parts) == 2:
+                        dir_path = parts[1].rstrip('/')
+                        dirs.append(os.path.basename(dir_path))
+            if not dirs:
+                print(f"{Fore.YELLOW}No test cases found in {path}{Style.RESET_ALL}")
+                return None
+
+            print("\nAvailable test cases (oldest to newest):")
+            for i, tc in enumerate(dirs, 1):
+                print(f"{i}) {tc}")
+
+            while True:
+                choice = input("\nEnter test case number: ").strip()
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(dirs):
+                        return dirs[idx]
+                    else:
+                        print(f"{Fore.YELLOW}Please enter a number between 1 and {len(dirs)}{Style.RESET_ALL}")
+                except ValueError:
+                    print(f"{Fore.YELLOW}Please enter a valid number{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}Error listing test cases: {e}{Style.RESET_ALL}")
+            return None
+
+    def copy_run_log(self, ssh_client, remote_path, local_path):
+        """複製run.log文件到本地"""
+        try:
+            sftp = ssh_client.open_sftp()
+            sftp.get(remote_path, local_path)
+            sftp.close()
+            return True
+        except Exception as e:
+            print(f"{Fore.RED}Error copying run.log: {e}{Style.RESET_ALL}")
+            return False
+
+    def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
+        """ResultLogCopier 不需要網路配置"""
+        pass
+
+    def configure(self):
+        print(
+        f"""{Fore.YELLOW}
+ ___________________________________________________________________
+ <Prerequisites>
+ To move forward, make sure you've already completed the following:
+    1. Deployed Agent on TC
+    2. Obtained the IP address of the Agent
+ ___________________________________________________________________{Style.RESET_ALL}
+    """
+        )
+
+        # 獲取 Agent IP
+        while True:
+            agent_ip = input("Enter Agent IP address: ").strip()
+            if self.validate_ip(agent_ip):
+                # Agent預設關閉ICMP阻止外部ping請求，直接嘗試建立 SSH 連接，不進行 ping 檢查
+                ssh_client = self.ssh_connect(agent_ip, self.username, self.password)
+                if ssh_client:
+                    break
+                else:
+                    print(f"{Fore.RED}Failed to connect to Agent. Please check the IP address and ensure Agent's SSH is enabled.{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+
+        try:
+            # 獲取第一層最新目錄
+            print("\nGetting latest result directory...")
+            first_level = self.get_latest_directory(ssh_client, "/results")
+            if not first_level:
+                print(f"{Fore.RED}No result directories found{Style.RESET_ALL}")
+                return
+
+            # 獲取第二層最新目錄
+            second_level = self.get_latest_directory(ssh_client, f"/results/{first_level}")
+            if not second_level:
+                print(f"{Fore.RED}No second level directories found{Style.RESET_ALL}")
+                return
+
+            # 列出並選擇測試案例
+            test_case = self.list_test_cases(ssh_client, f"/results/{first_level}/{second_level}")
+            if not test_case:
+                return
+
+            # 獲取第四層最新目錄
+            fourth_level = self.get_latest_directory(ssh_client, f"/results/{first_level}/{second_level}/{test_case}")
+            if not fourth_level:
+                print(f"{Fore.RED}No run logs found{Style.RESET_ALL}")
+                return
+
+            # 構建完整的遠端路徑
+            remote_path = f"/results/{first_level}/{second_level}/{test_case}/{fourth_level}/run.log"
+            
+            # 檢查run.log是否存在
+            stdin, stdout, stderr = ssh_client.exec_command(f"test -f {remote_path} && echo 'exists'")
+            if not stdout.read().decode().strip():
+                print(f"{Fore.RED}run.log not found at {remote_path}{Style.RESET_ALL}")
+                return
+
+            # 建立本地目錄結構，並處理非法字元
+            safe_test_case = self.sanitize_filename(test_case)
+            safe_fourth_level = self.sanitize_filename(fourth_level)
+            local_dir = os.path.join(os.getcwd(), safe_test_case, safe_fourth_level)
+            os.makedirs(local_dir, exist_ok=True)
+            local_path = os.path.join(local_dir, "run.log")
+
+            # 複製文件
+            print(f"\nCopying run.log to {local_path}...")
+            if self.copy_run_log(ssh_client, remote_path, local_path):
+                print(f"{Fore.GREEN}Successfully copied run.log{Style.RESET_ALL}")
+                print(f"\nFile location: {Fore.CYAN}{local_path}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}Failed to copy run.log{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
+        finally:
+            ssh_client.close()
 
 def show_menu():
     print(
     r"""
  =======================================
  VMware Cert Test Environment Setup Tool 
-                 v1.2 
+                 v1.3 
  =======================================
 
 Please select an option:
@@ -1848,20 +2008,21 @@ Please select an option:
 4) Config vCenter
 5) Add PCI Passthrough VM Options (NVIDIA GPU)
 6) Manage OVF/VM
-7) Exit
+7) Copy agent log
+8) Exit
 
 """
     )
     while True:
-        choice = input("Enter your choice (1-7): ").strip()
-        if choice in ['1', '2', '3', '4', '5', '6', '7']:
+        choice = input("Enter your choice (1-8): ").strip()
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8']:
             return choice
 
 def main():
     while True:
         choice = show_menu()
         
-        if choice == '7':
+        if choice == '8':
             print("\nExiting...")
             break
             
@@ -1883,6 +2044,9 @@ def main():
                 configurator.configure()
             elif choice == '6':
                 configurator = OVFManager()
+                configurator.configure()
+            elif choice == '7':
+                configurator = ResultLogCopier()
                 configurator.configure()
         except KeyboardInterrupt:
             print("\n\nOperation cancelled by user.")
