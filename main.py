@@ -14,6 +14,8 @@ from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim
 import ssl
 import json
+import tarfile
+import xml.etree.ElementTree as ET
 
 # Initialize colorama
 init()
@@ -133,7 +135,7 @@ class BaseConfigurator(ABC):
                 
             print(f"\nAvailable VMs on the target ESXi host (oldest to newest):")
             for i, name in enumerate(vm_names, 1):
-                print(f"{i}) {name}")
+                print(f"  {i}) {name}")
             return vm_names
         except Exception as e:
             print(f"{Fore.RED}Error listing VMs: {e}{Style.RESET_ALL}")
@@ -144,7 +146,7 @@ class SUTConfigurator(BaseConfigurator):
     def __init__(self):
         super().__init__()
         self.username = "root"
-        self.password = "Admin!23"
+        self.password = "Admin!23" 
         self.default_submask = "255.255.252.0"
         self.default_gateway = "192.168.4.1"
         self.default_dns = "192.168.4.1"
@@ -263,7 +265,7 @@ class SUTConfigurator(BaseConfigurator):
             sections = [
                 ("System Information", {
                     'Product Name': "esxcli hardware platform get | grep 'Product Name' | awk -F ': ' '{print $2}'",
-                    'OS version': "vmware -r",
+                    'OS version': "vmware -v",
                     'BMC IP': "esxcli hardware ipmi bmc get | grep 'IPv4Address' | awk -F ': ' '{print $2}'",
                     'Hyper-Threading': "esxcli hardware cpu global get | grep 'Hyperthreading Enabled' | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                 }),
@@ -304,7 +306,7 @@ class SUTConfigurator(BaseConfigurator):
  ___________________________________________________________________
  <Prerequisites>
  To move forward, make sure you've already completed the following:
-    1. Installed VMware ESXi on SUT
+    1. Installed VMware ESXi OS on SUT
     2. Enabled SSH access on SUT
     3. Obtained the local DHCP IP address (192.168.x.x) of SUT
  ___________________________________________________________________{Style.RESET_ALL}
@@ -321,7 +323,10 @@ class SUTConfigurator(BaseConfigurator):
                     print(f"{Fore.RED}Failed to ping IP{Style.RESET_ALL}")
             else:
                 print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
-
+        
+        # 保留彈性讓user自行輸入密碼或直接用預設 (若不想讓user設定可直接刪除下面這行)
+        self.password = self.get_valid_input(f"Enter SUT password <press Enter to accept default {Fore.CYAN}Admin!23{Style.RESET_ALL}>: ", default="Admin!23").strip()
+        
         # 建立 SSH 連接
         ssh_client = self.ssh_connect(SUT_dhcp_ip, self.username, self.password)
         if not ssh_client:
@@ -426,6 +431,7 @@ class SUTConfigurator(BaseConfigurator):
         print(f"\nRemember to create a new host {Fore.YELLOW}{dns_hostname}{Style.RESET_ALL} with IP {Fore.YELLOW}{static_ip}{Style.RESET_ALL} on DHCP server.")
 
 class VIVaConfigurator(BaseConfigurator):
+    # MTY的VIVa/agent/跳板機都給了兩個網路, 一個是對內的192.168.1.x, (vnic10: mty.com) 一個是對外的10.240.226.x (VM Network: labs.lenovo.com)
     def __init__(self):
         super().__init__()
         self.username = "root"
@@ -678,14 +684,15 @@ SendRelease=no
                 
                 url = "http://cert-viva-local/Certs"
                 pyperclip.copy(url)
-                print(f"\nEnsure the jump server has Internet connectivity, then open your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL}.")
-                print(f"\nDownload the {Fore.CYAN}Agent image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data on the web UI")
+                print(f"\nEnsure the jump server has Internet connectivity, then open your browser and press 'Ctrl + V' to visit {Fore.CYAN}{url}{Style.RESET_ALL}")
+                print(f"\nOn the web UI, download the {Fore.CYAN}Agent image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data")
             else:
                 print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
         else:
             print(f"{Fore.RED}Network configuration failed{Style.RESET_ALL}\n")
 
 class AgentConfigurator(BaseConfigurator):
+    # MTY的VIVa/agent/跳板機都給了兩個網路, 一個是對內的192.168.1.x, (vnic10: mty.com) 一個是對外的10.240.226.x (VM Network: labs.lenovo.com)
     def __init__(self):
         super().__init__()
         self.username = "root"
@@ -920,7 +927,7 @@ DNS={self.internal_dns}
                     print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
                     url = f"https://{internal_ip}/agent-ui"
                     pyperclip.copy(url)
-                    print(f"\nOpen your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
+                    print(f"\nOpen your browser and press 'Ctrl + V' to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
             
                 else:
                     print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
@@ -1086,6 +1093,10 @@ class PciPassthruConfigurator(BaseConfigurator):
                     if not self.validate_ip(host):
                         print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
                         continue
+
+                    # 保留彈性讓user自行輸入密碼或直接用預設 (若不想讓user設定可直接刪除下面這行)
+                    self.password = self.get_valid_input(f"Enter Host password <press Enter to accept default {Fore.CYAN}Admin!23{Style.RESET_ALL}>: ", default="Admin!23").strip()
+
                     # 測試連線
                     connected, self.si = self.test_connection(host, self.user, self.password)
                     if not connected:
@@ -1116,7 +1127,7 @@ class PciPassthruConfigurator(BaseConfigurator):
                     
 
         except KeyboardInterrupt:
-            print(f"\n{Fore.YELLOW}Program interrupted by user{Style.RESET_ALL}")
+            print("\n\nOperation cancelled by user.")
         except Exception as e:
             print(f"\n{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         finally:
@@ -1180,7 +1191,7 @@ class OVFManager(BaseConfigurator):
             
             print("\nAvailable OVF file(s) (oldest to newest):")
             for i, file in enumerate(ovf_files, 1):
-                print(f"{i}) {file}")
+                print(f"  {i}) {file}")
             
             while True:
                 try:
@@ -1190,20 +1201,94 @@ class OVFManager(BaseConfigurator):
                 except ValueError:
                     pass
 
+    def get_ovf_networks(self, ovf_file):
+        """只用 XML 解析 OVF network name，並同時解析 VM 名稱存到 self.last_vm_name"""
+        try:
+            ovf_content = None
+            if ovf_file.lower().endswith('.ova'):
+                with tarfile.open(ovf_file, 'r') as tar:
+                    ovf_name = next((m.name for m in tar.getmembers() if m.name.endswith('.ovf')), None)
+                    if not ovf_name:
+                        print(f"{Fore.RED}No .ovf file found in OVA{Style.RESET_ALL}")
+                        self.last_vm_name = None
+                        return []
+                    ovf_content = tar.extractfile(ovf_name).read().decode('utf-8')
+            else:
+                with open(ovf_file, 'r', encoding='utf-8') as f:
+                    ovf_content = f.read()
+            root = ET.fromstring(ovf_content)
+            ns = {'ovf': 'http://schemas.dmtf.org/ovf/envelope/1'}
+            # 解析 VM 名稱
+            vs = root.find('.//ovf:VirtualSystem', ns)
+            vm_name = None
+            if vs is not None and 'name' in vs.attrib:
+                vm_name = vs.attrib['name']
+            else:
+                name_elem = root.find('.//ovf:VirtualSystem/ovf:Name', ns)
+                if name_elem is not None:
+                    vm_name = name_elem.text
+            self.last_vm_name = vm_name
+            return [net.attrib.get('{' + ns['ovf'] + '}name', net.attrib.get('name'))
+                    for net in root.findall('.//ovf:NetworkSection/ovf:Network', ns)]
+        except Exception as e:
+            print(f"{Fore.RED}Error parsing OVF networks: {e}{Style.RESET_ALL}")
+            self.last_vm_name = None
+            return []
+
+    def get_network_mapping(self, ovf_networks, target_networks):
+        mapping = {}
+        for ovf_net in ovf_networks:
+            display_name = ovf_net.strip()
+            print(f"\nOVF network '{Fore.YELLOW}{display_name}{Style.RESET_ALL}' can be mapped to:")
+            for idx, net in enumerate(target_networks, 1):
+                print(f"  {idx}) {net}")
+            while True:
+                try:
+                    choice = int(input(f"Please enter the number for the target network for '{Fore.YELLOW}{display_name}{Style.RESET_ALL}': "))
+                    if 1 <= choice <= len(target_networks):
+                        mapping[ovf_net] = target_networks[choice - 1]
+                        break
+                    else:
+                        print(f"{Fore.RED}Please enter a valid number between 1 and {len(target_networks)}{Style.RESET_ALL}")
+                except ValueError:
+                    print(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
+        return mapping
+
     def deploy_ovf(self, host: str, ovf_file: str) -> bool:
-        """部署 OVF 文件到 ESXi 主機"""
+        """部署 OVF 文件到 ESXi 主機 (支援 network mapping)"""
         try:
             print(f"\n\nDeploying OVF file to ESXi host...")
+
+            # 1. 取得 OVF networks
+            ovf_networks = self.get_ovf_networks(ovf_file)
+            if ovf_networks:
+                print(f"\nRequired OVF networks: {', '.join([Fore.YELLOW + n + Style.RESET_ALL for n in ovf_networks])}")
+            else:
+                print(f"{Fore.YELLOW}No OVF networks detected (or failed to parse){Style.RESET_ALL}")
+
+            # 2. 取得 target networks
+            target_networks = self.get_target_networks(self.si)
+            if not target_networks:
+                print(f"{Fore.RED}No available target networks found. Please check ESXi configuration.{Style.RESET_ALL}")
+                return False
+
+            # 3. 一律讓 user mapping
+            mapping = self.get_network_mapping(ovf_networks, target_networks)
+            net_args = []
+            for ovf_net, target_net in mapping.items():
+                net_args.append(f'--net:{ovf_net}={target_net}')
+
             cmd = [
                 self.ovf_tool_path,
                 '--noSSLVerify',
                 '--acceptAllEulas',
                 '--X:logLevel=verbose',  # 顯示詳細日誌
                 f'--datastore={self.datastore}',
+            ] + net_args + [
                 ovf_file,
                 f'vi://{self.user}:{self.password}@{host}'
             ]
-            
+
             # 使用 subprocess.Popen 來即時顯示輸出
             process = subprocess.Popen(
                 cmd,
@@ -1213,7 +1298,7 @@ class OVFManager(BaseConfigurator):
                 bufsize=1,
                 universal_newlines=True
             )
-            
+
             # 即時顯示輸出
             while True:
                 output = process.stdout.readline()
@@ -1233,12 +1318,42 @@ class OVFManager(BaseConfigurator):
                         if 'Transfer Completed' in output:
                             output = output.replace('Transfer CompletedTransferCompleted', 'Transfer Completed')
                         print(output.strip())
-            
+
             # 獲取返回碼
             return_code = process.poll()
-            
+
             if return_code == 0:
                 print(f"\n{Fore.GREEN}OVF deployment successful{Style.RESET_ALL}")
+                # 檢查剛部署的 VM 電源狀態
+                vm_name = self.last_vm_name
+                try:
+                    content = self.si.RetrieveContent()
+                    container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+                    vm = None
+                    for managed_object in container.view:
+                        if managed_object.name == vm_name:
+                            vm = managed_object
+                            break
+                    container.Destroy()
+                    if not vm:
+                        print(f"{Fore.YELLOW}Warning: Cannot find deployed VM '{vm_name}' to check power state.{Style.RESET_ALL}")
+                    elif vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOff:
+                        while True:
+                            power_on = input(f"VM '{vm_name}' is currently powered off. Would you like to power it on? (y/n): ").strip().lower()
+                            if power_on == 'y':
+                                print(f"\n\nPowering on VM '{vm_name}'...")
+                                task = vm.PowerOnVM_Task()
+                                while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                                    pass
+                                if task.info.state == vim.TaskInfo.State.success:
+                                    print(f"{Fore.GREEN}VM powered on successfully{Style.RESET_ALL}")
+                                else:
+                                    print(f"{Fore.RED}Failed to power on VM: {task.info.error}{Style.RESET_ALL}")
+                                break
+                            elif power_on == 'n':
+                                break
+                except Exception as e:
+                    print(f"{Fore.YELLOW}Warning: Could not check or change VM power state: {e}{Style.RESET_ALL}")
                 return True
             else:
                 error = process.stderr.read()
@@ -1267,6 +1382,40 @@ class OVFManager(BaseConfigurator):
                 if response != 'y':
                     print(f"{Fore.YELLOW}Export cancelled{Style.RESET_ALL}")
                     return False
+
+            # 檢查VM電源狀態
+            content = self.si.RetrieveContent()
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+            vm = None
+            for managed_object in container.view:
+                if managed_object.name == vm_name:
+                    vm = managed_object
+                    break
+            container.Destroy()
+
+            if not vm:
+                print(f"{Fore.RED}VM '{vm_name}' not found{Style.RESET_ALL}")
+                return False
+
+            if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
+                print(f"{Fore.YELLOW}\nVM '{vm_name}' is currently powered on.{Style.RESET_ALL}")
+                while True:
+                    power_off = input("Would you like to power off the VM before export? (y/n): ").lower()
+                    if power_off == 'y':
+                        print(f"Powering off VM '{vm_name}'...")
+                        task = vm.PowerOffVM_Task()
+                        while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                            pass
+                        if task.info.state != vim.TaskInfo.State.success:
+                            print(f"{Fore.RED}Failed to power off VM: {task.info.error}{Style.RESET_ALL}")
+                            return False
+                        print(f"{Fore.GREEN}VM powered off successfully{Style.RESET_ALL}")
+                        break
+                    elif power_off == 'n':
+                        print(f"{Fore.YELLOW}Export cancelled{Style.RESET_ALL}")
+                        return False
+                    else:
+                        continue
             
             cmd = [
                 self.ovf_tool_path,
@@ -1404,7 +1553,7 @@ class OVFManager(BaseConfigurator):
  To move forward, make sure you've already completed the following:
     1. Installed 'VMware OVF Tool' on this machine (jump server)
     2. Obtained the IP address of the target ESXi host
-    3. Placed the OVF (.ovf or .ova) file in the current directory (for Deploy use)
+    3. Placed the OVF (.ova) file in the current directory (for Deploy use)
  __________________________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -1412,7 +1561,7 @@ class OVFManager(BaseConfigurator):
         if not self.check_ovf_tool():
             return
 
-        print("\n1) Deploy OVF to ESXi\n2) Export OVF from ESXi\n3) Delete VM from ESXi")
+        print("\n1) Deploy OVF to ESXi host\n2) Export OVF from ESXi host\n3) Delete VM from ESXi host")
         while True:
             choice = input("\nEnter your choice (1-3): ").strip()
             if choice in ['1', '2', '3']:
@@ -1420,11 +1569,15 @@ class OVFManager(BaseConfigurator):
 
         try:
             while True:
-                host = self.get_valid_input("\nEnter Host IP address: ")
+                host = self.get_valid_input("\nEnter ESXi Host IP address: ")
                 if host:
                     if not self.validate_ip(host):
                         print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
                         continue
+                    
+                    # 保留彈性讓user自行輸入密碼或直接用預設 (若不想讓user設定可直接刪除下面這行)
+                    self.password = self.get_valid_input(f"Enter ESXi password <press Enter to accept default {Fore.CYAN}Admin!23{Style.RESET_ALL}>: ", default="Admin!23").strip()
+                    
                     # 測試連線
                     connected, self.si = self.test_connection(host, self.user, self.password)
                     if not connected:
@@ -1434,6 +1587,10 @@ class OVFManager(BaseConfigurator):
             if choice == '1': # Deploy OVF
                 ovf_file = self.select_ovf_file()
                 if ovf_file:
+
+                    # 保留彈性讓user自行輸入datastore或直接用預設 (若不想讓user設定可直接刪除下面這行)
+                    self.datastore = self.get_valid_input(f"\nEnter datastore <press Enter to accept default {Fore.CYAN}datastore1{Style.RESET_ALL}>: ", default="datastore1").strip()
+
                     self.deploy_ovf(host, ovf_file)
             elif choice == '2': # Export OVF
                 vm_list = self.list_vms(self.si)
@@ -1497,6 +1654,7 @@ class VCConfigurator(BaseConfigurator):
         self.default_VC_root_password = "Admin!23"
         self.default_VC_sso_password = "Admin!23"
         self.default_VC_deployment_network = "All-Net網路-1GB-vmnic1"
+        self.default_VC_ntp_servers = "192.168.4.1"
 
     def mount_iso(self, iso_path):
         """掛載VCSA ISO並返回掛載的drive letter"""
@@ -1658,13 +1816,13 @@ class VCConfigurator(BaseConfigurator):
     def configure(self):
         print(
         f"""{Fore.YELLOW}
-_________________________________________________________________________________________
-<Prerequisites>
-To move forward, make sure you've already completed the following:
-1. Downloaded the VCSA image (.iso) and placed it in the current directory
-2. Created a DNS hostname and IP for vCenter VM on DHCP server (ex: vc50 -> 192.168.4.50)
-_________________________________________________________________________________________{Style.RESET_ALL}
-"""
+ _________________________________________________________________________________________
+ <Prerequisites>
+ To move forward, make sure you've already completed the following:
+    1. Downloaded the VCSA image (.iso) and placed it in the current directory
+    2. Created a DNS hostname and IP for vCenter VM on DHCP server (ex: vc50 -> 192.168.4.50)
+ _________________________________________________________________________________________{Style.RESET_ALL}
+    """
         )
                 
         # 檢查vCenter ISO是否存在
@@ -1763,6 +1921,11 @@ ________________________________________________________________________________
         if deployment_network == "":
             deployment_network = self.default_VC_deployment_network
 
+        # 取得 NTP server
+        ntp_servers = input(f"Enter vCenter NTP server <press Enter to accept default {Fore.CYAN}{self.default_VC_ntp_servers}{Style.RESET_ALL}>: ").strip()
+        if ntp_servers == "":
+            ntp_servers = self.default_VC_ntp_servers
+
         root_password = input(f"Enter vCenter root password <press Enter to accept default {Fore.CYAN}{self.default_VC_root_password}{Style.RESET_ALL}>: ").strip()
         if root_password == "":
             root_password = self.default_VC_root_password
@@ -1796,6 +1959,7 @@ ________________________________________________________________________________
             config['new_vcsa']['network']['system_name'] = network_config['system_name']
             
             config['new_vcsa']['os']['password'] = root_password
+            config['new_vcsa']['os']['ntp_servers'] = ntp_servers
             config['new_vcsa']['sso']['password'] = sso_password
             config['new_vcsa']['appliance']['deployment_option'] = deployment_size
             
@@ -1883,7 +2047,7 @@ class ResultLogCopier(BaseConfigurator):
 
             print("\nAvailable test cases (oldest to newest):")
             for i, tc in enumerate(dirs, 1):
-                print(f"{i}) {tc}")
+                print(f"  {i}) {tc}")
 
             while True:
                 choice = input("\nEnter test case number: ").strip()
@@ -1998,7 +2162,7 @@ def show_menu():
     r"""
  =======================================
  VMware Cert Test Environment Setup Tool 
-                 v1.3 
+                 v1.4 
  =======================================
 
 Please select an option:
@@ -2007,7 +2171,7 @@ Please select an option:
 3) Config Agent
 4) Config vCenter
 5) Add PCI Passthrough VM Options (NVIDIA GPU)
-6) Manage OVF/VM
+6) Deploy/Export OVF
 7) Copy agent log
 8) Exit
 

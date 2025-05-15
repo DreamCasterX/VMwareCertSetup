@@ -14,6 +14,8 @@ from pyVim.connect import SmartConnect, Disconnect
 from pyVmomi import vim
 import ssl
 import json
+import xml.etree.ElementTree as ET
+import tarfile
 
 # Initialize colorama
 init()
@@ -133,7 +135,7 @@ class BaseConfigurator(ABC):
                 
             print(f"\nAvailable VMs on the target ESXi host (oldest to newest):")
             for i, name in enumerate(vm_names, 1):
-                print(f"{i}) {name}")
+                print(f"  {i}) {name}")
             return vm_names
         except Exception as e:
             print(f"{Fore.RED}Error listing VMs: {e}{Style.RESET_ALL}")
@@ -144,7 +146,7 @@ class SUTConfigurator(BaseConfigurator):
     def __init__(self):
         super().__init__()
         self.username = "root"
-        self.password = "Passw0rd!"
+        self.password = "Passw0rd!" 
         self.default_submask = "255.255.255.0"
         self.default_gateway = "192.168.1.1"
         self.default_dns = "192.168.1.1"
@@ -263,7 +265,7 @@ class SUTConfigurator(BaseConfigurator):
             sections = [
                 ("System Information", {
                     'Product Name': "esxcli hardware platform get | grep 'Product Name' | awk -F ': ' '{print $2}'",
-                    'OS version': "vmware -r",
+                    'OS version': "vmware -v",
                     'BMC IP': "esxcli hardware ipmi bmc get | grep 'IPv4Address' | awk -F ': ' '{print $2}'",
                     'Hyper-Threading': "esxcli hardware cpu global get | grep 'Hyperthreading Enabled' | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                 }),
@@ -272,7 +274,7 @@ class SUTConfigurator(BaseConfigurator):
                     # 解除強制SB方法: esxcli system settings encryption set --require-secure-boot=F 再 /bin/backup.sh 0
                     'Secure boot enforcement': "esxcli system settings encryption get  | grep 'Require Secure Boot' | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
                     'TPM': "esxcli hardware trustedboot get | grep -i TPM | awk -F ': ' '{print $2}' | sed 's/true/Enabled/;s/false/Disabled/'",
-                    'Firewall': "esxcli network firewall get | grep 'Enabled' | awk -F ': ' '{print $2}' | sed 's/true/On/;s/false/Off/'",
+                    'Firewall': "esxcli network firewall get | grep 'Enabled' | awk -F ': ' '{print $2}' | sed 's/true/On/;s/false/Off/'",  
                 }),
                 ("Network Information", {
                     'OS IP': "esxcli network ip interface ipv4 get | awk 'NR==3 {print $2}'",
@@ -304,7 +306,7 @@ class SUTConfigurator(BaseConfigurator):
  ___________________________________________________________________
  <Prerequisites>
  To move forward, make sure you've already completed the following:
-    1. Installed VMware ESXi on SUT and set the password to "Passw0rd!"
+    1. Installed VMware ESXi OS on SUT
     2. Enabled SSH access on SUT
     3. Obtained the local DHCP IP address (192.168.x.x) of SUT
  ___________________________________________________________________{Style.RESET_ALL}
@@ -321,7 +323,10 @@ class SUTConfigurator(BaseConfigurator):
                     print(f"{Fore.RED}Failed to ping IP{Style.RESET_ALL}")
             else:
                 print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
-
+        
+        # 保留彈性讓user自行輸入密碼或直接用預設 (若不想讓user設定可直接刪除下面這行)
+        self.password = self.get_valid_input(f"Enter SUT password <press Enter to accept default {Fore.CYAN}Passw0rd!{Style.RESET_ALL}>: ", default="Passw0rd!").strip()
+        
         # 建立 SSH 連接
         ssh_client = self.ssh_connect(SUT_dhcp_ip, self.username, self.password)
         if not ssh_client:
@@ -423,7 +428,7 @@ class SUTConfigurator(BaseConfigurator):
 
         print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
         print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
-        print(f"\nRemember to create a new host {Fore.YELLOW}{dns_hostname}{Style.RESET_ALL} with IP {Fore.YELLOW}{static_ip}{Style.RESET_ALL} on DNS Manager.")
+        print(f"\nRemember to create a new host {Fore.YELLOW}{dns_hostname}{Style.RESET_ALL} with IP {Fore.YELLOW}{static_ip}{Style.RESET_ALL} on DHCP server.")
 
 class VIVaConfigurator(BaseConfigurator):
     # MTY的VIVa/agent/跳板機都給了兩個網路, 一個是對內的192.168.1.x, (vnic10: mty.com) 一個是對外的10.240.226.x (VM Network: labs.lenovo.com)
@@ -431,10 +436,6 @@ class VIVaConfigurator(BaseConfigurator):
         super().__init__()
         self.username = "root"
         self.password = "vmware"
-        self.external_gateway = "192.168.4.7"
-        self.external_dns = "10.241.96.14"
-        self.internal_gateway = "192.168.4.1"
-        self.internal_dns = "192.168.4.1"
         self.subnet_mask = "24" # 255.255.255.0
 
     def check_internet(self, ssh) -> bool:
@@ -444,7 +445,6 @@ class VIVaConfigurator(BaseConfigurator):
             cmd = 'wget --spider --timeout=5 www.google.com'
             stdin, stdout, stderr = ssh.exec_command(cmd)
             exit_status = stdout.channel.recv_exit_status()
-            
             if exit_status == 0:
                 return True
             else:
@@ -472,43 +472,35 @@ class VIVaConfigurator(BaseConfigurator):
             print(f"{Fore.RED}Error configuring hosts file: {e}{Style.RESET_ALL}")
             return False
 
-    def configure_external_network_config(self, ssh_client, external_ip: str) -> tuple:
-        """Configure external network settings"""
+    def configure_internal_network_config(self, ssh_client, internal_ip: str) -> tuple:
         network_config = f"""[Match]
 Name=e*
 
 [Network]
-DHCP=no
-Address={external_ip}/{self.subnet_mask}
-Gateway={self.external_gateway}
-DNS={self.external_dns}
+DHCP=yes
 IP6AcceptRA=no
 
 [DHCPv4]
 SendRelease=no
 """
         try:
-            print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for external network...")
+            print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for internal network...")
             sftp = ssh_client.open_sftp()
             with sftp.file('/etc/systemd/network/99-dhcp-en.network', 'w') as f:
                 f.write(network_config)
             sftp.close()
-            
             stdin, stdout, stderr = ssh_client.exec_command(
                 "sudo systemctl restart systemd-networkd"
             )
-            
             ssh_client.close()
-            
             print("Waiting for network service to restart...")
             time.sleep(10)
-            
-            new_ssh_client = self.ssh_connect(external_ip, self.username, self.password)
+            new_ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
             if new_ssh_client:
                 return True, new_ssh_client
             return False, None
         except Exception as e:
-            print(f"{Fore.RED}External network configuration error: {e}{Style.RESET_ALL}")
+            print(f"{Fore.RED}Internal network configuration error: {e}{Style.RESET_ALL}")
             return False, None
 
     def set_hostname(self, ssh_client) -> bool:
@@ -525,72 +517,8 @@ SendRelease=no
             print(f"{Fore.RED}Error setting hostname: {e}{Style.RESET_ALL}")
             return False
 
-    def configure_internal_network_config(self, ssh_client, internal_ip: str) -> tuple:
-        """Configure internal network settings"""
-        network_config = f"""[Match]
-Name=e*
-
-[Network]
-DHCP=no
-Address={internal_ip}/{self.subnet_mask}
-Gateway={self.internal_gateway}
-DNS={self.internal_dns}
-IP6AcceptRA=no
-
-[DHCPv4]
-SendRelease=no
-"""
-        try:
-            print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for internal network...")
-            sftp = ssh_client.open_sftp()
-            with sftp.file('/etc/systemd/network/99-dhcp-en.network', 'w') as f:
-                f.write(network_config)
-            sftp.close()
-            
-            stdin, stdout, stderr = ssh_client.exec_command(
-                "sudo systemctl restart systemd-networkd"
-            )
-            
-            ssh_client.close()
-            
-            print("Waiting for network service to restart...")
-            time.sleep(10)
-            
-            new_ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
-            if new_ssh_client:
-                return True, new_ssh_client
-            return False, None
-        except Exception as e:
-            print(f"{Fore.RED}Internal network configuration error: {e}{Style.RESET_ALL}")
-            return False, None
-
-    def update_jump_server_hosts_file(self, internal_ip: str) -> bool:
-        """Update local hosts file with VIVa entry"""
-        hosts_file = r"C:\Windows\System32\drivers\etc\hosts"
-        new_entry = f"{internal_ip} cert-viva-local"
-        
-        try:
-            print(f"\nUpdating {hosts_file} for jump server")
-            
-            with open(hosts_file, 'r') as f:
-                lines = f.readlines()
-            
-            filtered_lines = [line for line in lines if 'cert-viva-local' not in line]
-            
-            with open(hosts_file, 'w') as f:
-                f.writelines(filtered_lines)
-                f.write(f"\n{new_entry}")
-            return True
-        except PermissionError:
-            print(f"{Fore.RED}Permission denied. Please run the script as administrator{Style.RESET_ALL}")
-            return False
-        except Exception as e:
-            print(f"{Fore.RED}Error updating hosts file: {e}{Style.RESET_ALL}")
-            return False
-
     def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
-        """VIVa specific network configuration"""
-        # VIVa specific implementation
+        # 不需要網路配置
         pass
 
     def configure(self):
@@ -608,7 +536,7 @@ SendRelease=no
 
         # 獲取內部 IP
         while True:
-            internal_ip = input("Enter VIVa IP address: ").strip()
+            internal_ip = input("Enter VIVa local IP address (192.168.x.x): ").strip()
             if self.validate_ip(internal_ip):
                 if self.ping_check(internal_ip):
                     break
@@ -636,67 +564,41 @@ SendRelease=no
             return
         print(f"{Fore.GREEN}Hosts file configuration successful{Style.RESET_ALL}\n\n")
 
-        # 獲取外部 IP
-        external_ip = internal_ip
-        print(f"\nUsing internal IP {Fore.CYAN}{external_ip}{Style.RESET_ALL} for Internet access")
-
-        # 配置外部網路
-        success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip)
-        if success and new_ssh_client:
-            print(f"{Fore.GREEN}External network configuration successful{Style.RESET_ALL}\n")
-            ssh_client = new_ssh_client
-            
-            if self.check_internet(ssh_client):
-                print(f"{Fore.GREEN}Internet connectivity check successful{Style.RESET_ALL}\n\n")
-
-                print("Refreshing VIVA service...")
-                stdin, stdout, stderr = ssh_client.exec_command(
-                    "bash /opt/broadcom/viva/refresh_viva_service.sh"
+        # 直接檢查 internet 連線
+        if self.check_internet(ssh_client):
+            print(f"{Fore.GREEN}Internet connectivity check successful{Style.RESET_ALL}\n\n")
+            print("Refreshing VIVA service...")
+            stdin, stdout, stderr = ssh_client.exec_command(
+                "bash /opt/broadcom/viva/refresh_viva_service.sh"
+            )
+            if stdout.channel.recv_exit_status() == 0:
+                print(f"{Fore.GREEN}VIVA service refresh successful{Style.RESET_ALL}\n")
+                success, new_ssh_client = self.configure_internal_network_config(
+                    ssh_client, internal_ip
                 )
-                if stdout.channel.recv_exit_status() == 0:
-                    print(f"{Fore.GREEN}VIVA service refresh successful{Style.RESET_ALL}\n")
-                    
-                    success, new_ssh_client = self.configure_internal_network_config(
-                        ssh_client, internal_ip
-                    )
-                    if success and new_ssh_client:
-                        print(f"{Fore.GREEN}Internal network configuration successful{Style.RESET_ALL}\n")
-                        ssh_client = new_ssh_client
-                        
-                        ssh_client.close()
-                        
-                        if self.update_jump_server_hosts_file(internal_ip):
-                            print(f"{Fore.GREEN}Jump server hosts file configuration successful{Style.RESET_ALL}")
-                        else:
-                            print(f"{Fore.RED}Failed to update jump server hosts file{Style.RESET_ALL}")
-                    else:
-                        print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
+                if success and new_ssh_client:
+                    print(f"{Fore.GREEN}Internal network configuration successful{Style.RESET_ALL}\n")
+                    new_ssh_client.close()
+                    print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
+                    print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
+                    url = "http://cert-viva-local/Certs"
+                    pyperclip.copy(url)
+                    print(f"\nEnsure the jump server has Internet connectivity, then open your browser and press 'Ctrl + V' to visit {Fore.CYAN}{url}{Style.RESET_ALL}")
+                    print(f"\nOn the web UI, download the {Fore.CYAN}Agent image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data")
                 else:
-                    print(f"{Fore.RED}Failed to refresh VIVa service{Style.RESET_ALL}\n")
-                    
-                print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
-                print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
-                
-                url = "http://cert-viva-local/Certs"
-                pyperclip.copy(url)
-                print(f"\nEnsure the jump server has Internet connectivity, then open your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL}.")
-                print(f"\nDownload the {Fore.CYAN}Agent image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data on the web UI")
+                    print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
             else:
-                print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
+                print(f"{Fore.RED}Failed to refresh VIVa service{Style.RESET_ALL}\n")
         else:
-            print(f"{Fore.RED}Network configuration failed{Style.RESET_ALL}\n")
+            print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
+        ssh_client.close()
 
-class AgentConfigurator(BaseConfigurator):  
+class AgentConfigurator(BaseConfigurator):
     # MTY的VIVa/agent/跳板機都給了兩個網路, 一個是對內的192.168.1.x, (vnic10: mty.com) 一個是對外的10.240.226.x (VM Network: labs.lenovo.com)
     def __init__(self):
         super().__init__()
         self.username = "root"
         self.password = "vmware"
-        self.external_gateway = "192.168.4.7"
-        self.external_dns = "10.241.96.14"
-        self.internal_gateway = "192.168.4.1"
-        self.internal_dns = "192.168.4.1"
-        self.subnet_mask = "22" # 255.255.252.0
 
     def check_internet(self, ssh) -> bool:
         """Check internet connectivity"""
@@ -705,7 +607,6 @@ class AgentConfigurator(BaseConfigurator):
             cmd = 'wget --spider --timeout=5 www.google.com'
             stdin, stdout, stderr = ssh.exec_command(cmd)
             exit_status = stdout.channel.recv_exit_status()
-            
             if exit_status == 0:
                 return True
             else:
@@ -716,80 +617,8 @@ class AgentConfigurator(BaseConfigurator):
             print(f"{Fore.RED}Error checking internet connection: {str(e)}{Style.RESET_ALL}")
             return False
 
-    def configure_external_network_config(self, ssh_client, external_ip: str) -> tuple:
-        """Configure external network settings"""
-        network_config = f"""[Match]
-Name=e*
-
-[Network]
-DHCP=no
-Address={external_ip}/{self.subnet_mask}
-Gateway={self.external_gateway}
-DNS={self.external_dns}
-"""
-        try:
-            print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for external network...")
-            sftp = ssh_client.open_sftp()
-            with sftp.file('/etc/systemd/network/99-dhcp-en.network', 'w') as f:
-                f.write(network_config)
-            sftp.close()
-
-            # Agent無法使用sudo
-            stdin, stdout, stderr = ssh_client.exec_command(
-                "systemctl restart systemd-networkd"
-            )
-            
-            ssh_client.close()
-            
-            print("Waiting for network service to restart...")
-            time.sleep(10)
-            
-            new_ssh_client = self.ssh_connect(external_ip, self.username, self.password)
-            if new_ssh_client:
-                return True, new_ssh_client
-            return False, None
-        except Exception as e:
-            print(f"{Fore.RED}External network configuration error: {e}{Style.RESET_ALL}")
-            return False, None
-
-    def configure_internal_network_config(self, ssh_client, internal_ip: str) -> tuple:
-        """Configure internal network settings"""
-        network_config = f"""[Match]
-Name=e*
-
-[Network]
-DHCP=no
-Address={internal_ip}/{self.subnet_mask}
-Gateway={self.internal_gateway}
-DNS={self.internal_dns}
-"""
-        try:
-            print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for internal network...")
-            sftp = ssh_client.open_sftp()
-            with sftp.file('/etc/systemd/network/99-dhcp-en.network', 'w') as f:
-                f.write(network_config)
-            sftp.close()
-            
-            stdin, stdout, stderr = ssh_client.exec_command(
-                "sudo systemctl restart systemd-networkd"
-            )
-            
-            ssh_client.close()
-            
-            print("Waiting for network service to restart...")
-            time.sleep(10)
-            
-            new_ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
-            if new_ssh_client:
-                return True, new_ssh_client
-            return False, None
-        except Exception as e:
-            print(f"{Fore.RED}Internal network configuration error: {e}{Style.RESET_ALL}")
-            return False, None
-
     def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
-        """Agent specific network configuration"""
-        # Agent specific implementation
+        # 不需要網路配置
         pass
 
     def configure(self):
@@ -809,7 +638,7 @@ DNS={self.internal_dns}
         # 獲取內部 IP 並建立 SSH 連接
         ssh_client = None
         while True:
-            internal_ip = input("Enter Agent IP address: ").strip()
+            internal_ip = input("Enter Agent local IP address (192.168.x.x): ").strip()
             if self.validate_ip(internal_ip):
                 # Agent預設關閉ICMP阻止外部ping請求，直接嘗試建立 SSH 連接，不進行 ping 檢查
                 ssh_client = self.ssh_connect(internal_ip, self.username, self.password)
@@ -829,14 +658,12 @@ DNS={self.internal_dns}
         print("\nTransferring runlist to Agent...")
         if not os.path.exists(runlist_path):
             print(f"{Fore.YELLOW}runlist.json not found in the current directory.{Style.RESET_ALL}")
-        
         while True:
             if not os.path.exists(runlist_path):
                 while True:
                     response = input("Please place runlist.json in the current directory to continue (y/n): ").strip().lower()
                     if response in ['y', 'n']:
                         break
-                
                 if response == 'y':
                     # 重新檢查檔案是否存在
                     if os.path.exists(runlist_path):
@@ -875,67 +702,42 @@ DNS={self.internal_dns}
             ssh_client.close()
             return
 
-        # 直接使用內部 IP當作外部 IP
-        external_ip = internal_ip
-        print(f"\nUsing internal IP {Fore.CYAN}{external_ip}{Style.RESET_ALL} for Internet access")
-
-        # 配置外部網路
-        success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip)
-        if success and new_ssh_client:
-            print(f"{Fore.GREEN}External network configuration successful{Style.RESET_ALL}\n")
-            ssh_client = new_ssh_client
-            
-            if self.check_internet(ssh_client):
-                print(f"{Fore.GREEN}Internet connectivity check successful{Style.RESET_ALL}\n\n")
-
-                print("Running AgentLauncher...")
-                stdin, stdout, stderr = ssh_client.exec_command("AgentLauncher -i")
-
-                # 追蹤已完成的docker image層數
-                completed_layers = 0
-                total_layers = 0
-
-                for line in stdout:
-                    line = line.strip()
-                    if "Pulling fs layer" in line:
-                        total_layers += 1
-                    elif "Pull complete" in line:
-                        completed_layers += 1
-                        print(f"\rProgress: {completed_layers}/{total_layers} layers completed", end='', flush=True)
-
-                # 最後打印一個換行
-                print()
-
-                # 檢查錯誤
-                for line in stderr:
-                    print(f"Error: {line.strip()}")
-                    
-                success, new_ssh_client = self.configure_internal_network_config(
-                    ssh_client, internal_ip
-                )
-                if success and new_ssh_client:
-                    print(f"{Fore.GREEN}Internal network configuration successful{Style.RESET_ALL}\n")
-                    ssh_client = new_ssh_client
-                    ssh_client.close()
-                    
-                    print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
-                    print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
-                    url = f"https://{internal_ip}/agent-ui"
-                    pyperclip.copy(url)
-                    print(f"\nOpen your browser to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
-            
-                else:
-                    print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
+        # 直接檢查 internet 連線
+        if self.check_internet(ssh_client):
+            print(f"{Fore.GREEN}Internet connectivity check successful{Style.RESET_ALL}\n\n")
+            print("Running AgentLauncher...")
+            stdin, stdout, stderr = ssh_client.exec_command("AgentLauncher -i")
+            completed_layers = 0
+            total_layers = 0
+            for line in stdout:
+                line = line.strip()
+                if "Pulling fs layer" in line:
+                    total_layers += 1
+                elif "Pull complete" in line:
+                    completed_layers += 1
+                    print(f"\rProgress: {completed_layers}/{total_layers} layers completed", end='', flush=True)
+            print()
+            for line in stderr:
+                print(f"Error: {line.strip()}")
+            # 檢查 AgentLauncher 是否成功
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status == 0:
+                print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
+                print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
+                url = f"https://{internal_ip}/agent-ui"
+                pyperclip.copy(url)
+                print(f"\nOpen your browser and press 'Ctrl + V' to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
             else:
-                print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
+                print(f"{Fore.RED}AgentLauncher failed with exit code {exit_status}{Style.RESET_ALL}")
         else:
-            print(f"{Fore.RED}Network configuration failed{Style.RESET_ALL}\n")
+            print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
+        ssh_client.close()
 
 class PciPassthruConfigurator(BaseConfigurator):
     def __init__(self):
         super().__init__()
         self.user = "root"           # ESXi 使用者
-        self.password = "Admin!23"   # ESXi 密碼
+        self.password = "Passw0rd!"   # ESXi 密碼
 
     def add_vm_options(self, si, vm_name):
         """添加 PCI Passthrough 選項到 VM"""
@@ -1088,6 +890,10 @@ class PciPassthruConfigurator(BaseConfigurator):
                     if not self.validate_ip(host):
                         print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
                         continue
+
+                    # 保留彈性讓user自行輸入密碼或直接用預設 (若不想讓user設定可直接刪除下面這行)
+                    self.password = self.get_valid_input(f"Enter Host password <press Enter to accept default {Fore.CYAN}Passw0rd!{Style.RESET_ALL}>: ", default="Passw0rd!").strip()
+
                     # 測試連線
                     connected, self.si = self.test_connection(host, self.user, self.password)
                     if not connected:
@@ -1118,7 +924,7 @@ class PciPassthruConfigurator(BaseConfigurator):
                     
 
         except KeyboardInterrupt:
-            print(f"\n{Fore.YELLOW}Program interrupted by user{Style.RESET_ALL}")
+            print("\n\nOperation cancelled by user.")
         except Exception as e:
             print(f"\n{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         finally:
@@ -1182,7 +988,7 @@ class OVFManager(BaseConfigurator):
             
             print("\nAvailable OVF file(s) (oldest to newest):")
             for i, file in enumerate(ovf_files, 1):
-                print(f"{i}) {file}")
+                print(f"  {i}) {file}")
             
             while True:
                 try:
@@ -1192,20 +998,110 @@ class OVFManager(BaseConfigurator):
                 except ValueError:
                     pass
 
+    def get_ovf_networks(self, ovf_file):
+        """用 XML 解析 OVF network name，並同時解析 VM 名稱存到 self.last_vm_name"""
+        try:
+            ovf_content = None
+            if ovf_file.lower().endswith('.ova'):
+                with tarfile.open(ovf_file, 'r') as tar:
+                    ovf_name = next((m.name for m in tar.getmembers() if m.name.endswith('.ovf')), None)
+                    if not ovf_name:
+                        print(f"{Fore.RED}No .ovf file found in OVA{Style.RESET_ALL}")
+                        self.last_vm_name = None
+                        return []
+                    ovf_content = tar.extractfile(ovf_name).read().decode('utf-8')
+            else:
+                with open(ovf_file, 'r', encoding='utf-8') as f:
+                    ovf_content = f.read()
+            root = ET.fromstring(ovf_content)
+            ns = {'ovf': 'http://schemas.dmtf.org/ovf/envelope/1'}
+            # 解析 VM 名稱
+            vs = root.find('.//ovf:VirtualSystem', ns)
+            vm_name = None
+            if vs is not None and 'name' in vs.attrib:
+                vm_name = vs.attrib['name']
+            else:
+                name_elem = root.find('.//ovf:VirtualSystem/ovf:Name', ns)
+                if name_elem is not None:
+                    vm_name = name_elem.text
+            self.last_vm_name = vm_name
+            return [net.attrib.get('{' + ns['ovf'] + '}name', net.attrib.get('name'))
+                    for net in root.findall('.//ovf:NetworkSection/ovf:Network', ns)]
+        except Exception as e:
+            print(f"{Fore.RED}Error parsing OVF networks: {e}{Style.RESET_ALL}")
+            self.last_vm_name = None
+            return []
+
+    def get_target_networks(self, si):
+        """查詢 ESXi host 上所有可用的 target networks"""
+        try:
+            content = si.RetrieveContent()
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.Network], True)
+            networks = [net.name for net in container.view]
+
+            # 顯示ESXi上面可用的網路
+            # print("Networks found on ESXi host:", networks)  
+            container.Destroy()
+            return networks
+        except Exception as e:
+            print(f"{Fore.RED}Error retrieving target networks: {e}{Style.RESET_ALL}")
+            return []
+
+    def get_network_mapping(self, ovf_networks, target_networks):
+        mapping = {}
+        for ovf_net in ovf_networks:
+            # 顯示時 strip，mapping 用原始 name
+            display_name = ovf_net.strip()
+            print(f"\nOVF network '{Fore.YELLOW}{display_name}{Style.RESET_ALL}' can be mapped to:")
+            for idx, net in enumerate(target_networks, 1):
+                print(f"  {idx}) {net}")
+            while True:
+                try:
+                    choice = int(input(f"Please enter the number for the target network for '{Fore.YELLOW}{display_name}{Style.RESET_ALL}': "))
+                    if 1 <= choice <= len(target_networks):
+                        mapping[ovf_net] = target_networks[choice - 1]
+                        break
+                    else:
+                        print(f"{Fore.RED}Please enter a valid number between 1 and {len(target_networks)}{Style.RESET_ALL}")
+                except ValueError:
+                    print(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
+        return mapping
+
     def deploy_ovf(self, host: str, ovf_file: str) -> bool:
-        """部署 OVF 文件到 ESXi 主機"""
+        """部署 OVF 文件到 ESXi 主機 (支援 network mapping)"""
         try:
             print(f"\n\nDeploying OVF file to ESXi host...")
+
+            # 1. 取得 OVF networks
+            ovf_networks = self.get_ovf_networks(ovf_file)
+            if ovf_networks:
+                print(f"\nRequired OVF networks: {', '.join([Fore.YELLOW + n + Style.RESET_ALL for n in ovf_networks])}")
+            else:
+                print(f"{Fore.YELLOW}No OVF networks detected (or failed to parse){Style.RESET_ALL}")
+
+            # 2. 取得 target networks
+            target_networks = self.get_target_networks(self.si)
+            if not target_networks:
+                print(f"{Fore.RED}No available target networks found. Please check ESXi configuration.{Style.RESET_ALL}")
+                return False
+
+            # 3. 一律讓 user mapping
+            mapping = self.get_network_mapping(ovf_networks, target_networks)
+            net_args = []
+            for ovf_net, target_net in mapping.items():
+                net_args.append(f'--net:{ovf_net}={target_net}')
+
             cmd = [
                 self.ovf_tool_path,
                 '--noSSLVerify',
                 '--acceptAllEulas',
                 '--X:logLevel=verbose',  # 顯示詳細日誌
                 f'--datastore={self.datastore}',
+            ] + net_args + [
                 ovf_file,
                 f'vi://{self.user}:{self.password}@{host}'
             ]
-            
+
             # 使用 subprocess.Popen 來即時顯示輸出
             process = subprocess.Popen(
                 cmd,
@@ -1215,7 +1111,7 @@ class OVFManager(BaseConfigurator):
                 bufsize=1,
                 universal_newlines=True
             )
-            
+
             # 即時顯示輸出
             while True:
                 output = process.stdout.readline()
@@ -1235,12 +1131,43 @@ class OVFManager(BaseConfigurator):
                         if 'Transfer Completed' in output:
                             output = output.replace('Transfer CompletedTransferCompleted', 'Transfer Completed')
                         print(output.strip())
-            
+
             # 獲取返回碼
             return_code = process.poll()
-            
+
             if return_code == 0:
                 print(f"\n{Fore.GREEN}OVF deployment successful{Style.RESET_ALL}")
+                # 檢查剛部署的 VM 電源狀態
+                vm_name = self.last_vm_name
+                try:
+                    content = self.si.RetrieveContent()
+                    container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+                    vm = None
+                    for managed_object in container.view:
+                        if managed_object.name == vm_name:
+                            vm = managed_object
+                            break
+                    container.Destroy()
+                    if not vm:
+                        print(f"{Fore.YELLOW}Warning: Cannot find deployed VM '{vm_name}' to check power state.{Style.RESET_ALL}")
+                        return True
+                    if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOff:
+                        while True:
+                            power_on = input(f"VM '{vm_name}' is currently powered off. Would you like to power it on? (y/n): ").strip().lower()
+                            if power_on == 'y':
+                                print(f"\n\nPowering on VM '{vm_name}'...")
+                                task = vm.PowerOnVM_Task()
+                                while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                                    pass
+                                if task.info.state == vim.TaskInfo.State.success:
+                                    print(f"{Fore.GREEN}VM powered on successfully{Style.RESET_ALL}")
+                                else:
+                                    print(f"{Fore.RED}Failed to power on VM: {task.info.error}{Style.RESET_ALL}")
+                                break
+                            elif power_on == 'n':
+                                break
+                except Exception as e:
+                    print(f"{Fore.YELLOW}Warning: Could not check or change VM power state: {e}{Style.RESET_ALL}")
                 return True
             else:
                 error = process.stderr.read()
@@ -1269,6 +1196,40 @@ class OVFManager(BaseConfigurator):
                 if response != 'y':
                     print(f"{Fore.YELLOW}Export cancelled{Style.RESET_ALL}")
                     return False
+
+            # 檢查VM電源狀態
+            content = self.si.RetrieveContent()
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
+            vm = None
+            for managed_object in container.view:
+                if managed_object.name == vm_name:
+                    vm = managed_object
+                    break
+            container.Destroy()
+
+            if not vm:
+                print(f"{Fore.RED}VM '{vm_name}' not found{Style.RESET_ALL}")
+                return False
+
+            if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
+                print(f"{Fore.YELLOW}\nVM '{vm_name}' is currently powered on.{Style.RESET_ALL}")
+                while True:
+                    power_off = input("Would you like to power off the VM before export? (y/n): ").lower()
+                    if power_off == 'y':
+                        print(f"Powering off VM '{vm_name}'...")
+                        task = vm.PowerOffVM_Task()
+                        while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                            pass
+                        if task.info.state != vim.TaskInfo.State.success:
+                            print(f"{Fore.RED}Failed to power off VM: {task.info.error}{Style.RESET_ALL}")
+                            return False
+                        print(f"{Fore.GREEN}VM powered off successfully{Style.RESET_ALL}")
+                        break
+                    elif power_off == 'n':
+                        print(f"{Fore.YELLOW}Export cancelled{Style.RESET_ALL}")
+                        return False
+                    else:
+                        continue
             
             cmd = [
                 self.ovf_tool_path,
@@ -1406,7 +1367,7 @@ class OVFManager(BaseConfigurator):
  To move forward, make sure you've already completed the following:
     1. Installed 'VMware OVF Tool' on this machine (jump server)
     2. Obtained the IP address of the target ESXi host
-    3. Placed the OVF (.ovf or .ova) file in the current directory (for Deploy use)
+    3. Placed the OVF (.ova) file in the current directory (for Deploy use)
  __________________________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -1414,7 +1375,7 @@ class OVFManager(BaseConfigurator):
         if not self.check_ovf_tool():
             return
 
-        print("\n1) Deploy OVF to ESXi\n2) Export OVF from ESXi\n3) Delete VM from ESXi")
+        print("\n1) Deploy OVF to ESXi host\n2) Export OVF from ESXi host\n3) Delete VM from ESXi host")
         while True:
             choice = input("\nEnter your choice (1-3): ").strip()
             if choice in ['1', '2', '3']:
@@ -1422,11 +1383,15 @@ class OVFManager(BaseConfigurator):
 
         try:
             while True:
-                host = self.get_valid_input("\nEnter Host IP address: ")
+                host = self.get_valid_input("\nEnter ESXi Host IP address: ")
                 if host:
                     if not self.validate_ip(host):
                         print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
                         continue
+                    
+                    # 保留彈性讓user自行輸入密碼或直接用預設 (若不想讓user設定可直接刪除下面這行)
+                    self.password = self.get_valid_input(f"Enter ESXi password <press Enter to accept default {Fore.CYAN}Passw0rd!{Style.RESET_ALL}>: ", default="Passw0rd!").strip()
+                    
                     # 測試連線
                     connected, self.si = self.test_connection(host, self.user, self.password)
                     if not connected:
@@ -1436,6 +1401,10 @@ class OVFManager(BaseConfigurator):
             if choice == '1': # Deploy OVF
                 ovf_file = self.select_ovf_file()
                 if ovf_file:
+
+                    # 保留彈性讓user自行輸入datastore或直接用預設 (若不想讓user設定可直接刪除下面這行)
+                    self.datastore = self.get_valid_input(f"\nEnter datastore <press Enter to accept default {Fore.CYAN}datastore1{Style.RESET_ALL}>: ", default="datastore1").strip()
+
                     self.deploy_ovf(host, ovf_file)
             elif choice == '2': # Export OVF
                 vm_list = self.list_vms(self.si)
@@ -1495,10 +1464,11 @@ class VCConfigurator(BaseConfigurator):
         self.default_TC_password = "Passw0rd!"   
         self.default_VC_prefix = "24"
         self.default_VC_gateway = "192.168.1.1"
-        self.default_VC_dns_servers = "192.168.1.10"
-        self.default_VC_root_password = "Admin!23"
+        self.default_VC_dns_servers = "192.168.1.1"
+        self.default_VC_root_password = "Passw0rd!"
         self.default_VC_sso_password = "Lenovo-123"
-        self.default_VC_deployment_network = "vnic10"
+        self.default_VC_deployment_network = "VM Network"
+        self.default_VC_ntp_servers = "pool.ntp.org"
 
     def mount_iso(self, iso_path):
         """掛載VCSA ISO並返回掛載的drive letter"""
@@ -1540,18 +1510,18 @@ class VCConfigurator(BaseConfigurator):
                     "ip_family": "ipv4",
                     "mode": "static",
                     "ip": "192.168.4.98",
-                    "prefix": "22",
-                    "gateway": "192.168.4.1",
-                    "dns_servers": ["192.168.4.1"],
-                    "system_name": "vc98.lenovo.com"
+                    "prefix": "24",
+                    "gateway": "192.168.1.1",
+                    "dns_servers": ["192.168.1.1"],
+                    "system_name": "vc98.mty.com"
                 },
                 "os": {
-                    "password": "Admin!23",
-                    "ntp_servers": "192.168.4.1",
+                    "password": "Passw0rd!",
+                    "ntp_servers": "192.168.1.1",
                     "ssh_enable": True
                 },
                 "sso": {
-                    "password": "Admin!23",
+                    "password": "Lenovo-123",
                     "domain_name": "vsphere.local",
                     "first_instance": True
                 }
@@ -1660,13 +1630,13 @@ class VCConfigurator(BaseConfigurator):
     def configure(self):
         print(
         f"""{Fore.YELLOW}
-_________________________________________________________________________________________
-<Prerequisites>
-To move forward, make sure you've already completed the following:
-1. Downloaded the VCSA image (.iso) and placed it in the current directory
-2. Created a DNS hostname and IP for vCenter VM on DHCP server (ex: vc50 -> 192.168.4.50)
-_________________________________________________________________________________________{Style.RESET_ALL}
-"""
+ _________________________________________________________________________________________
+ <Prerequisites>
+ To move forward, make sure you've already completed the following:
+    1. Downloaded the VCSA image (.iso) and placed it in the current directory
+    2. Created a DNS hostname and IP for vCenter VM on DHCP server (ex: vc50 -> 192.168.4.50)
+ _________________________________________________________________________________________{Style.RESET_ALL}
+    """
         )
                 
         # 檢查vCenter ISO是否存在
@@ -1706,12 +1676,13 @@ ________________________________________________________________________________
         esxi_username = input(f"Enter TC username <press Enter to accept default {Fore.CYAN}{self.default_TC_username}{Style.RESET_ALL}>: ").strip()
         if esxi_username == "":
             esxi_username = self.default_TC_username
-        esxi_password = input(f"Enter TC password: ").strip()
+        
+        # esxi_password = input(f"Enter TC password: ").strip()
 
-        # TC預設密碼保留隱私
-        # esxi_password = input(f"Enter TC password <press Enter to accept default {Fore.CYAN}{self.default_TC_password}{Style.RESET_ALL}>: ").strip()
-        # if esxi_password == "":
-        #     esxi_password = self.default_TC_password
+        # TC預設密碼保留隱私 (MTY直接公開)
+        esxi_password = input(f"Enter TC password <press Enter to accept default {Fore.CYAN}{self.default_TC_password}{Style.RESET_ALL}>: ").strip()
+        if esxi_password == "":
+            esxi_password = self.default_TC_password
         
         esxi_datastore = input(f"Enter TC datastore <press Enter to accept default {Fore.CYAN}{self.default_TC_datastore}{Style.RESET_ALL}>: ").strip()
         if esxi_datastore == "":
@@ -1733,7 +1704,7 @@ ________________________________________________________________________________
             else:
                 print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
 
-        suggested_system_name = f"vc{network_config['ip'].split('.')[-1]}.lenovo.com"
+        suggested_system_name = f"vc{network_config['ip'].split('.')[-1]}.mty.com"
         network_config['system_name'] = input(f"Enter vCenter system name <press Enter to accept {Fore.CYAN}{suggested_system_name}{Style.RESET_ALL}>: ").strip()
         if network_config['system_name'] == "":
             network_config['system_name'] = suggested_system_name
@@ -1765,6 +1736,10 @@ ________________________________________________________________________________
         if deployment_network == "":
             deployment_network = self.default_VC_deployment_network
 
+        # 取得 NTP server
+        ntp_servers = input(f"Enter vCenter NTP server <press Enter to accept default {Fore.CYAN}{self.default_VC_ntp_servers}{Style.RESET_ALL}>: ").strip()
+        if ntp_servers == "":
+            ntp_servers = self.default_VC_ntp_servers
         root_password = input(f"Enter vCenter root password <press Enter to accept default {Fore.CYAN}{self.default_VC_root_password}{Style.RESET_ALL}>: ").strip()
         if root_password == "":
             root_password = self.default_VC_root_password
@@ -1798,6 +1773,7 @@ ________________________________________________________________________________
             config['new_vcsa']['network']['system_name'] = network_config['system_name']
             
             config['new_vcsa']['os']['password'] = root_password
+            config['new_vcsa']['os']['ntp_servers'] = ntp_servers
             config['new_vcsa']['sso']['password'] = sso_password
             config['new_vcsa']['appliance']['deployment_option'] = deployment_size
             
@@ -1837,13 +1813,170 @@ ________________________________________________________________________________
                 print(f"\n   - vCenter Client UI: {Fore.CYAN}{url_vcsa}{Style.RESET_ALL}")
                 print(f"\nLogin with user name: {Fore.CYAN}administrator@vsphere.local{Style.RESET_ALL} and password: {Fore.CYAN}{sso_password}{Style.RESET_ALL}\n")
 
+class ResultLogCopier(BaseConfigurator):
+    def __init__(self):
+        super().__init__()
+        self.username = "root"
+        self.password = "vmware"
+
+    def get_latest_directory(self, ssh_client, path):
+        """獲取指定路徑下最新的目錄"""
+        try:
+            stdin, stdout, stderr = ssh_client.exec_command(f"ls -t {path}")
+            directories = stdout.read().decode().strip().split('\n')
+            if directories and directories[0]:
+                return directories[0]
+            return None
+        except Exception as e:
+            print(f"{Fore.RED}Error getting latest directory: {e}{Style.RESET_ALL}")
+            return None
+
+    def sanitize_filename(self, name):
+        # Windows 不允許 : ? * | < > \\ / "作為資料夾名稱, 用底線代替
+        return re.sub(r'[:?*|<>\\/\"]', '_', name)
+
+    def list_test_cases(self, ssh_client, path):
+        """列出測試案例目錄並讓用戶選擇（依據目錄內最新檔案的修改時間由舊到新）"""
+        try:
+            # 取得每個目錄下最新檔案的修改時間，並排序
+            cmd = (
+                f"for d in {path}/*/; do "
+                "t=$(find \"$d\" -type f -printf '%T@\\n' 2>/dev/null | sort -n | tail -1); "
+                "if [ -n \"$t\" ]; then echo \"$t $d\"; fi; "
+                "done | sort -n"
+            )
+            stdin, stdout, stderr = ssh_client.exec_command(cmd)
+            lines = stdout.read().decode().strip().split('\n')
+            dirs = []
+            for line in lines:
+                if line.strip():
+                    # line: 'timestamp /results/xxx/yyy/zzz/'
+                    parts = line.strip().split(' ', 1)
+                    if len(parts) == 2:
+                        dir_path = parts[1].rstrip('/')
+                        dirs.append(os.path.basename(dir_path))
+            if not dirs:
+                print(f"{Fore.YELLOW}No test cases found in {path}{Style.RESET_ALL}")
+                return None
+
+            print("\nAvailable test cases (oldest to newest):")
+            for i, tc in enumerate(dirs, 1):
+                print(f"  {i}) {tc}")
+
+            while True:
+                choice = input("\nEnter test case number: ").strip()
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(dirs):
+                        return dirs[idx]
+                    else:
+                        print(f"{Fore.YELLOW}Please enter a number between 1 and {len(dirs)}{Style.RESET_ALL}")
+                except ValueError:
+                    print(f"{Fore.YELLOW}Please enter a valid number{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}Error listing test cases: {e}{Style.RESET_ALL}")
+            return None
+
+    def copy_run_log(self, ssh_client, remote_path, local_path):
+        """複製run.log文件到本地"""
+        try:
+            sftp = ssh_client.open_sftp()
+            sftp.get(remote_path, local_path)
+            sftp.close()
+            return True
+        except Exception as e:
+            print(f"{Fore.RED}Error copying run.log: {e}{Style.RESET_ALL}")
+            return False
+
+    def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
+        """ResultLogCopier 不需要網路配置"""
+        pass
+
+    def configure(self):
+        print(
+        f"""{Fore.YELLOW}
+ ___________________________________________________________________
+ <Prerequisites>
+ To move forward, make sure you've already completed the following:
+    1. Deployed Agent on TC
+    2. Obtained the IP address of the Agent
+ ___________________________________________________________________{Style.RESET_ALL}
+    """
+        )
+
+        # 獲取 Agent IP
+        while True:
+            agent_ip = input("Enter Agent IP address: ").strip()
+            if self.validate_ip(agent_ip):
+                # Agent預設關閉ICMP阻止外部ping請求，直接嘗試建立 SSH 連接，不進行 ping 檢查
+                ssh_client = self.ssh_connect(agent_ip, self.username, self.password)
+                if ssh_client:
+                    break
+                else:
+                    print(f"{Fore.RED}Failed to connect to Agent. Please check the IP address and ensure Agent's SSH is enabled.{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+
+        try:
+            # 獲取第一層最新目錄
+            print("\nGetting latest result directory...")
+            first_level = self.get_latest_directory(ssh_client, "/results")
+            if not first_level:
+                print(f"{Fore.RED}No result directories found{Style.RESET_ALL}")
+                return
+
+            # 獲取第二層最新目錄
+            second_level = self.get_latest_directory(ssh_client, f"/results/{first_level}")
+            if not second_level:
+                print(f"{Fore.RED}No second level directories found{Style.RESET_ALL}")
+                return
+
+            # 列出並選擇測試案例
+            test_case = self.list_test_cases(ssh_client, f"/results/{first_level}/{second_level}")
+            if not test_case:
+                return
+
+            # 獲取第四層最新目錄
+            fourth_level = self.get_latest_directory(ssh_client, f"/results/{first_level}/{second_level}/{test_case}")
+            if not fourth_level:
+                print(f"{Fore.RED}No run logs found{Style.RESET_ALL}")
+                return
+
+            # 構建完整的遠端路徑
+            remote_path = f"/results/{first_level}/{second_level}/{test_case}/{fourth_level}/run.log"
+            
+            # 檢查run.log是否存在
+            stdin, stdout, stderr = ssh_client.exec_command(f"test -f {remote_path} && echo 'exists'")
+            if not stdout.read().decode().strip():
+                print(f"{Fore.RED}run.log not found at {remote_path}{Style.RESET_ALL}")
+                return
+
+            # 建立本地目錄結構，並處理非法字元
+            safe_test_case = self.sanitize_filename(test_case)
+            safe_fourth_level = self.sanitize_filename(fourth_level)
+            local_dir = os.path.join(os.getcwd(), safe_test_case, safe_fourth_level)
+            os.makedirs(local_dir, exist_ok=True)
+            local_path = os.path.join(local_dir, "run.log")
+
+            # 複製文件
+            print(f"\nCopying run.log to {local_path}...")
+            if self.copy_run_log(ssh_client, remote_path, local_path):
+                print(f"{Fore.GREEN}Successfully copied run.log{Style.RESET_ALL}")
+                print(f"\nFile location: {Fore.CYAN}{local_path}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}Failed to copy run.log{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
+        finally:
+            ssh_client.close()
 
 def show_menu():
     print(
     r"""
  =======================================
  VMware Cert Test Environment Setup Tool 
-                 v1.2 
+                 v1.4 
  =======================================
 
 Please select an option:
@@ -1852,21 +1985,22 @@ Please select an option:
 3) Config Agent
 4) Config vCenter
 5) Add PCI Passthrough VM Options (NVIDIA GPU)
-6) Manage OVF/VM
-7) Exit
+6) Deploy/Export OVF
+7) Copy agent log
+8) Exit
 
 """
     )
     while True:
-        choice = input("Enter your choice (1-7): ").strip()
-        if choice in ['1', '2', '3', '4', '5', '6', '7']:
+        choice = input("Enter your choice (1-8): ").strip()
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8']:
             return choice
 
 def main():
     while True:
         choice = show_menu()
         
-        if choice == '7':
+        if choice == '8':
             print("\nExiting...")
             break
             
@@ -1888,6 +2022,9 @@ def main():
                 configurator.configure()
             elif choice == '6':
                 configurator = OVFManager()
+                configurator.configure()
+            elif choice == '7':
+                configurator = ResultLogCopier()
                 configurator.configure()
         except KeyboardInterrupt:
             print("\n\nOperation cancelled by user.")
