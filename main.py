@@ -1653,7 +1653,7 @@ class VCConfigurator(BaseConfigurator):
         self.default_VC_dns_servers = "192.168.4.1"
         self.default_VC_root_password = "Admin!23"
         self.default_VC_sso_password = "Admin!23"
-        self.default_VC_deployment_network = "All-Net網路-1GB-vmnic1"
+        # self.default_VC_deployment_network = "All-Net網路-1GB-vmnic1"  # 允許用戶直接按 Enter 使用預設值時，這個屬性才有意義
         self.default_VC_ntp_servers = "192.168.4.1"
 
     def mount_iso(self, iso_path):
@@ -1875,6 +1875,12 @@ class VCConfigurator(BaseConfigurator):
 
         print("")
 
+        # 測試連線
+        connected, self.si = self.test_connection(esxi_host, esxi_username, esxi_password)
+        if not connected:
+            print(f"{Fore.RED}Failed to connect to ESXi host{Style.RESET_ALL}")
+            return
+
         # 配置vCenter
         while True:
             vm_name = input(f"Enter vCenter VM name: ").strip()
@@ -1917,10 +1923,6 @@ class VCConfigurator(BaseConfigurator):
                 print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
         network_config['dns_servers'] = [server.strip() for server in dns_servers.split(',')]
 
-        deployment_network = input(f"Enter vCenter deployment network <press Enter to accept default {Fore.CYAN}{self.default_VC_deployment_network}{Style.RESET_ALL}>: ").strip()
-        if deployment_network == "":
-            deployment_network = self.default_VC_deployment_network
-
         # 取得 NTP server
         ntp_servers = input(f"Enter vCenter NTP server <press Enter to accept default {Fore.CYAN}{self.default_VC_ntp_servers}{Style.RESET_ALL}>: ").strip()
         if ntp_servers == "":
@@ -1935,7 +1937,29 @@ class VCConfigurator(BaseConfigurator):
         
         deployment_size = "medium"
         template_path = os.path.join(os.getcwd(), "vcsa_deployment.json")
-        
+
+        # 顯示可用的networks 並詢問選擇
+        available_networks = self.get_available_networks(self.si)
+        if not available_networks:
+            print(f"{Fore.RED}No networks found on ESXi host{Style.RESET_ALL}")
+            return
+
+        print("\nAvailable networks on ESXi host:")
+        for i, network in enumerate(available_networks, 1):
+            print(f"  {i}) {network}")
+
+        while True:
+            try:
+                network_choice = input(f"Enter vCenter deployment network (1-{len(available_networks)}): ").strip()
+                idx = int(network_choice) - 1
+                if 0 <= idx < len(available_networks):
+                    deployment_network = available_networks[idx]
+                    break
+                else:
+                    print(f"{Fore.YELLOW}Please enter a number between 1 and {len(available_networks)}{Style.RESET_ALL}")
+            except ValueError:
+                print(f"{Fore.YELLOW}Please enter a valid number{Style.RESET_ALL}")
+
         mount_drive = None
         deployment_success = False
         try:
@@ -1998,6 +2022,21 @@ class VCConfigurator(BaseConfigurator):
                 print(f"\n   - vCenter Server Management UI: {Fore.CYAN}{url_management}{Style.RESET_ALL}")
                 print(f"\n   - vCenter Client UI: {Fore.CYAN}{url_vcsa}{Style.RESET_ALL}")
                 print(f"\nLogin with user name: {Fore.CYAN}administrator@vsphere.local{Style.RESET_ALL} and password: {Fore.CYAN}{sso_password}{Style.RESET_ALL}\n")
+
+    def get_available_networks(self, si):
+        """獲取 ESXi host 上可用的網路"""
+        try:
+            content = si.RetrieveContent()
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.Network], True)
+            networks = []
+            for network in container.view:
+                if isinstance(network, vim.Network):
+                    networks.append(network.name)
+            container.Destroy()
+            return sorted(networks)
+        except Exception as e:
+            print(f"{Fore.RED}Error getting available networks: {e}{Style.RESET_ALL}")
+            return []
 
 class ResultLogCopier(BaseConfigurator):
     def __init__(self):
