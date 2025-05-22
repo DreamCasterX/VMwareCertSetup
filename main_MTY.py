@@ -285,7 +285,7 @@ class SUTConfigurator(BaseConfigurator):
                 }),
                 ("Managing State", {
                     'Maintenance mode': "esxcli system maintenanceMode get",
-                    "Connected to vCenter": "/etc/init.d/vpxa status | grep 'vpxa is running' > /dev/null&& echo 'Yes' || echo 'No'"
+                    'Connected to vCenter': "vim-cmd hostsvc/hostsummary | grep managementServerIp | awk -F '\"' '{print $2}' | grep -q . && echo 'Yes' || echo 'No'"
                 })
             ]
 
@@ -328,9 +328,18 @@ class SUTConfigurator(BaseConfigurator):
         self.password = self.get_valid_input(f"Enter SUT password <press Enter to accept default {Fore.CYAN}Passw0rd!{Style.RESET_ALL}>: ", default="Passw0rd!").strip()
         
         # 建立 SSH 連接
-        ssh_client = self.ssh_connect(SUT_dhcp_ip, self.username, self.password)
-        if not ssh_client:
-            return
+        while True:
+            ssh_client = self.ssh_connect(SUT_dhcp_ip, self.username, self.password)
+            if ssh_client:
+                break
+            print(f"{Fore.RED}Failed to connect to SUT via SSH. Please make sure SSH is enabled on the ESXi host.{Style.RESET_ALL}")
+            while True:
+                user_input = input("Manually enable SSH and continue? (y/n): ").strip().lower()
+                if user_input in ['y', 'n']:
+                    break
+            if user_input == 'n':
+                return
+            # 若 user_input == 'y'，則會再次嘗試連線
 
         # 啟用 ESXi Shell
         print("\nEnabling ESXi Shell...")
@@ -416,8 +425,8 @@ class SUTConfigurator(BaseConfigurator):
             return
         print(f"{Fore.GREEN}DNS IP and hostname set successfully{Style.RESET_ALL}")
 
-        # 配置防火牆
-        print("\nConfiguring firewall...")
+        # 關閉防火牆
+        print("\nTurning off firewall...")
         if not self.configure_firewall(ssh_client):
             return
 
@@ -1052,12 +1061,12 @@ class OVFManager(BaseConfigurator):
         for ovf_net in ovf_networks:
             # 顯示時 strip，mapping 用原始 name
             display_name = ovf_net.strip()
-            print(f"\nOVF network '{Fore.YELLOW}{display_name}{Style.RESET_ALL}' can be mapped to:")
+            print(f"\nOVF network {Fore.YELLOW}{display_name}{Style.RESET_ALL} can be mapped to:")
             for idx, net in enumerate(target_networks, 1):
                 print(f"  {idx}) {net}")
             while True:
                 try:
-                    choice = int(input(f"Please enter the number for the target network for '{Fore.YELLOW}{display_name}{Style.RESET_ALL}': "))
+                    choice = int(input(f"Enter the number for the target network for {Fore.YELLOW}{display_name}{Style.RESET_ALL}: "))
                     if 1 <= choice <= len(target_networks):
                         mapping[ovf_net] = target_networks[choice - 1]
                         break
@@ -1065,38 +1074,57 @@ class OVFManager(BaseConfigurator):
                         print(f"{Fore.RED}Please enter a valid number between 1 and {len(target_networks)}{Style.RESET_ALL}")
                 except ValueError:
                     print(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
+            print("\n")  
         return mapping
 
-    def deploy_ovf(self, host: str, ovf_file: str) -> bool:
+    def deploy_ovf(self, host: str, ovf_file: str = None) -> bool:
         """部署 OVF 文件到 ESXi 主機 (支援 network mapping)"""
         try:
+            # 1. 顯示即將部署
             print(f"\n\nDeploying OVF file to ESXi host...")
 
-            # 1. 取得 OVF networks
+            # 2. 取得 OVF 檔案（如果沒傳進來）
+            if not ovf_file:
+                ovf_file = self.select_ovf_file()
+                if not ovf_file:
+                    return False
+
+            # 3. 取得 OVF networks 與預設 VM 名稱
             ovf_networks = self.get_ovf_networks(ovf_file)
+            default_vm_name = self.last_vm_name
+
+            # 4 讓 user 輸入 VM 名稱
+            vm_name = input(f"Enter the target VM name <press Enter to accept default {Fore.CYAN}{default_vm_name}{Style.RESET_ALL}>: ").strip()
+            if not vm_name:
+                vm_name = default_vm_name
+
+            # 5. 讓 user 輸入 datastore
+            self.datastore = self.get_valid_input(f"Enter the target datastore <press Enter to accept default {Fore.CYAN}datastore1{Style.RESET_ALL}>: ", default="datastore1").strip()
+
+            # 6. 取得 target networks 並進行 mapping
             if ovf_networks:
-                print(f"\nRequired OVF networks: {', '.join([Fore.YELLOW + n + Style.RESET_ALL for n in ovf_networks])}")
+                print(f"Required OVF networks: {', '.join([Fore.YELLOW + n + Style.RESET_ALL for n in ovf_networks])}")
             else:
                 print(f"{Fore.YELLOW}No OVF networks detected (or failed to parse){Style.RESET_ALL}")
 
-            # 2. 取得 target networks
             target_networks = self.get_target_networks(self.si)
             if not target_networks:
                 print(f"{Fore.RED}No available target networks found. Please check ESXi configuration.{Style.RESET_ALL}")
                 return False
 
-            # 3. 一律讓 user mapping
             mapping = self.get_network_mapping(ovf_networks, target_networks)
             net_args = []
             for ovf_net, target_net in mapping.items():
                 net_args.append(f'--net:{ovf_net}={target_net}')
 
+            # 7. ovftool 命令加上 --name
             cmd = [
                 self.ovf_tool_path,
                 '--noSSLVerify',
                 '--acceptAllEulas',
                 '--X:logLevel=verbose',  # 顯示詳細日誌
                 f'--datastore={self.datastore}',
+                f'--name={vm_name}',
             ] + net_args + [
                 ovf_file,
                 f'vi://{self.user}:{self.password}@{host}'
@@ -1138,7 +1166,6 @@ class OVFManager(BaseConfigurator):
             if return_code == 0:
                 print(f"\n{Fore.GREEN}OVF deployment successful{Style.RESET_ALL}")
                 # 檢查剛部署的 VM 電源狀態
-                vm_name = self.last_vm_name
                 try:
                     content = self.si.RetrieveContent()
                     container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
@@ -1150,8 +1177,7 @@ class OVFManager(BaseConfigurator):
                     container.Destroy()
                     if not vm:
                         print(f"{Fore.YELLOW}Warning: Cannot find deployed VM '{vm_name}' to check power state.{Style.RESET_ALL}")
-                        return True
-                    if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOff:
+                    elif vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOff:
                         while True:
                             power_on = input(f"VM '{vm_name}' is currently powered off. Would you like to power it on? (y/n): ").strip().lower()
                             if power_on == 'y':
@@ -1401,11 +1427,8 @@ class OVFManager(BaseConfigurator):
             if choice == '1': # Deploy OVF
                 ovf_file = self.select_ovf_file()
                 if ovf_file:
-
-                    # 保留彈性讓user自行輸入datastore或直接用預設 (若不想讓user設定可直接刪除下面這行)
-                    self.datastore = self.get_valid_input(f"\nEnter datastore <press Enter to accept default {Fore.CYAN}datastore1{Style.RESET_ALL}>: ", default="datastore1").strip()
-
                     self.deploy_ovf(host, ovf_file)
+
             elif choice == '2': # Export OVF
                 vm_list = self.list_vms(self.si)
                 if vm_list:

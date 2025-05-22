@@ -285,7 +285,7 @@ class SUTConfigurator(BaseConfigurator):
                 }),
                 ("Managing State", {
                     'Maintenance mode': "esxcli system maintenanceMode get",
-                    "Connected to vCenter": "/etc/init.d/vpxa status | grep 'vpxa is running' > /dev/null&& echo 'Yes' || echo 'No'"
+                    'Connected to vCenter': "vim-cmd hostsvc/hostsummary | grep managementServerIp | awk -F '\"' '{print $2}' | grep -q . && echo 'Yes' || echo 'No'"
                 })
             ]
 
@@ -328,9 +328,18 @@ class SUTConfigurator(BaseConfigurator):
         self.password = self.get_valid_input(f"Enter SUT password <press Enter to accept default {Fore.CYAN}Admin!23{Style.RESET_ALL}>: ", default="Admin!23").strip()
         
         # 建立 SSH 連接
-        ssh_client = self.ssh_connect(SUT_dhcp_ip, self.username, self.password)
-        if not ssh_client:
-            return
+        while True:
+            ssh_client = self.ssh_connect(SUT_dhcp_ip, self.username, self.password)
+            if ssh_client:
+                break
+            print(f"{Fore.RED}Failed to connect to SUT via SSH. Please make sure SSH is enabled on the ESXi host.{Style.RESET_ALL}")
+            while True:
+                user_input = input("Manually enable SSH and continue? (y/n): ").strip().lower()
+                if user_input in ['y', 'n']:
+                    break
+            if user_input == 'n':
+                return
+            # 若 user_input == 'y'，則會再次嘗試連線
 
         # 啟用 ESXi Shell
         print("\nEnabling ESXi Shell...")
@@ -416,8 +425,8 @@ class SUTConfigurator(BaseConfigurator):
             return
         print(f"{Fore.GREEN}DNS IP and hostname set successfully{Style.RESET_ALL}")
 
-        # 配置防火牆
-        print("\nConfiguring firewall...")
+        # 關閉防火牆
+        print("\nTurning off firewall...")
         if not self.configure_firewall(ssh_client):
             return
 
@@ -437,7 +446,7 @@ class VIVaConfigurator(BaseConfigurator):
         self.username = "root"
         self.password = "vmware"
         self.external_gateway = "192.168.4.7"
-        self.external_dns = "10.245.255.221"
+        self.external_dns = "10.96.1.18"
         self.internal_gateway = "192.168.4.1"
         self.internal_dns = "192.168.4.1"
         self.subnet_mask = "22" # 255.255.252.0
@@ -477,7 +486,7 @@ class VIVaConfigurator(BaseConfigurator):
             print(f"{Fore.RED}Error configuring hosts file: {e}{Style.RESET_ALL}")
             return False
 
-    def configure_external_network_config(self, ssh_client, external_ip: str) -> tuple:
+    def configure_external_network_config(self, ssh_client, external_ip: str, external_dns: str) -> tuple:
         """Configure external network settings"""
         network_config = f"""[Match]
 Name=e*
@@ -486,7 +495,7 @@ Name=e*
 DHCP=no
 Address={external_ip}/{self.subnet_mask}
 Gateway={self.external_gateway}
-DNS={self.external_dns}
+DNS={external_dns}
 IP6AcceptRA=no
 
 [DHCPv4]
@@ -641,12 +650,22 @@ SendRelease=no
             return
         print(f"{Fore.GREEN}Hosts file configuration successful{Style.RESET_ALL}\n\n")
 
-        # 獲取外部 IP
+        # 直接使用內部 IP當作外部 IP
         external_ip = internal_ip
         print(f"\nUsing internal IP {Fore.CYAN}{external_ip}{Style.RESET_ALL} for Internet access")
 
+        # 設定外部 DNS
+        while True:
+            external_dns = input(f"Enter external DNS <press Enter to accept default {Fore.CYAN}{self.external_dns}{Style.RESET_ALL}>: ").strip()
+            if external_dns == "":
+                external_dns = self.external_dns
+            if self.validate_ip(external_dns):
+                break
+            else:
+                print(f"{Fore.YELLOW}Invalid DNS IP format{Style.RESET_ALL}")
+
         # 配置外部網路
-        success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip)
+        success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip, external_dns)
         if success and new_ssh_client:
             print(f"{Fore.GREEN}External network configuration successful{Style.RESET_ALL}\n")
             ssh_client = new_ssh_client
@@ -698,7 +717,7 @@ class AgentConfigurator(BaseConfigurator):
         self.username = "root"
         self.password = "vmware"
         self.external_gateway = "192.168.4.7"
-        self.external_dns = "10.245.255.221"
+        self.external_dns = "10.96.1.18"
         self.internal_gateway = "192.168.4.1"
         self.internal_dns = "192.168.4.1"
         self.subnet_mask = "22" # 255.255.252.0
@@ -721,7 +740,7 @@ class AgentConfigurator(BaseConfigurator):
             print(f"{Fore.RED}Error checking internet connection: {str(e)}{Style.RESET_ALL}")
             return False
 
-    def configure_external_network_config(self, ssh_client, external_ip: str) -> tuple:
+    def configure_external_network_config(self, ssh_client, external_ip: str, external_dns: str) -> tuple:
         """Configure external network settings"""
         network_config = f"""[Match]
 Name=e*
@@ -730,7 +749,7 @@ Name=e*
 DHCP=no
 Address={external_ip}/{self.subnet_mask}
 Gateway={self.external_gateway}
-DNS={self.external_dns}
+DNS={external_dns}
 """
         try:
             print("\nConfiguring /etc/systemd/network/99-dhcp-en.network for external network...")
@@ -884,8 +903,18 @@ DNS={self.internal_dns}
         external_ip = internal_ip
         print(f"\nUsing internal IP {Fore.CYAN}{external_ip}{Style.RESET_ALL} for Internet access")
 
+        # 設定外部 DNS
+        while True:
+            external_dns = input(f"Enter external DNS <press Enter to accept default {Fore.CYAN}{self.external_dns}{Style.RESET_ALL}>: ").strip()
+            if external_dns == "":
+                external_dns = self.external_dns
+            if self.validate_ip(external_dns):
+                break
+            else:
+                print(f"{Fore.YELLOW}Invalid DNS IP format{Style.RESET_ALL}")
+
         # 配置外部網路
-        success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip)
+        success, new_ssh_client = self.configure_external_network_config(ssh_client, external_ip, external_dns)
         if success and new_ssh_client:
             print(f"{Fore.GREEN}External network configuration successful{Style.RESET_ALL}\n")
             ssh_client = new_ssh_client
@@ -1239,12 +1268,12 @@ class OVFManager(BaseConfigurator):
         mapping = {}
         for ovf_net in ovf_networks:
             display_name = ovf_net.strip()
-            print(f"\nOVF network '{Fore.YELLOW}{display_name}{Style.RESET_ALL}' can be mapped to:")
+            print(f"\nOVF network {Fore.YELLOW}{display_name}{Style.RESET_ALL} can be mapped to:")
             for idx, net in enumerate(target_networks, 1):
                 print(f"  {idx}) {net}")
             while True:
                 try:
-                    choice = int(input(f"Please enter the number for the target network for '{Fore.YELLOW}{display_name}{Style.RESET_ALL}': "))
+                    choice = int(input(f"Enter the number for the target network for {Fore.YELLOW}{display_name}{Style.RESET_ALL}: "))
                     if 1 <= choice <= len(target_networks):
                         mapping[ovf_net] = target_networks[choice - 1]
                         break
@@ -1252,38 +1281,57 @@ class OVFManager(BaseConfigurator):
                         print(f"{Fore.RED}Please enter a valid number between 1 and {len(target_networks)}{Style.RESET_ALL}")
                 except ValueError:
                     print(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
+            print("\n")
         return mapping
 
-    def deploy_ovf(self, host: str, ovf_file: str) -> bool:
+    def deploy_ovf(self, host: str, ovf_file: str = None) -> bool:
         """部署 OVF 文件到 ESXi 主機 (支援 network mapping)"""
         try:
+            # 1. 顯示即將部署
             print(f"\n\nDeploying OVF file to ESXi host...")
 
-            # 1. 取得 OVF networks
+            # 2. 取得 OVF 檔案（如果沒傳進來）
+            if not ovf_file:
+                ovf_file = self.select_ovf_file()
+                if not ovf_file:
+                    return False
+
+            # 3. 取得 OVF networks 與預設 VM 名稱
             ovf_networks = self.get_ovf_networks(ovf_file)
+            default_vm_name = self.last_vm_name
+
+            # 4 讓 user 輸入 VM 名稱
+            vm_name = input(f"Enter the target VM name <press Enter to accept default {Fore.CYAN}{default_vm_name}{Style.RESET_ALL}>: ").strip()
+            if not vm_name:
+                vm_name = default_vm_name
+
+            # 5. 讓 user 輸入 datastore
+            self.datastore = self.get_valid_input(f"Enter the target datastore <press Enter to accept default {Fore.CYAN}datastore1{Style.RESET_ALL}>: ", default="datastore1").strip()
+
+            # 6. 取得 target networks 並進行 mapping
             if ovf_networks:
-                print(f"\nRequired OVF networks: {', '.join([Fore.YELLOW + n + Style.RESET_ALL for n in ovf_networks])}")
+                print(f"Required OVF networks: {', '.join([Fore.YELLOW + n + Style.RESET_ALL for n in ovf_networks])}")
             else:
                 print(f"{Fore.YELLOW}No OVF networks detected (or failed to parse){Style.RESET_ALL}")
 
-            # 2. 取得 target networks
             target_networks = self.get_target_networks(self.si)
             if not target_networks:
                 print(f"{Fore.RED}No available target networks found. Please check ESXi configuration.{Style.RESET_ALL}")
                 return False
 
-            # 3. 一律讓 user mapping
             mapping = self.get_network_mapping(ovf_networks, target_networks)
             net_args = []
             for ovf_net, target_net in mapping.items():
                 net_args.append(f'--net:{ovf_net}={target_net}')
 
+            # 7. ovftool 命令加上 --name
             cmd = [
                 self.ovf_tool_path,
                 '--noSSLVerify',
                 '--acceptAllEulas',
                 '--X:logLevel=verbose',  # 顯示詳細日誌
                 f'--datastore={self.datastore}',
+                f'--name={vm_name}',
             ] + net_args + [
                 ovf_file,
                 f'vi://{self.user}:{self.password}@{host}'
@@ -1325,7 +1373,6 @@ class OVFManager(BaseConfigurator):
             if return_code == 0:
                 print(f"\n{Fore.GREEN}OVF deployment successful{Style.RESET_ALL}")
                 # 檢查剛部署的 VM 電源狀態
-                vm_name = self.last_vm_name
                 try:
                     content = self.si.RetrieveContent()
                     container = content.viewManager.CreateContainerView(content.rootFolder, [vim.VirtualMachine], True)
@@ -1587,11 +1634,8 @@ class OVFManager(BaseConfigurator):
             if choice == '1': # Deploy OVF
                 ovf_file = self.select_ovf_file()
                 if ovf_file:
-
-                    # 保留彈性讓user自行輸入datastore或直接用預設 (若不想讓user設定可直接刪除下面這行)
-                    self.datastore = self.get_valid_input(f"\nEnter datastore <press Enter to accept default {Fore.CYAN}datastore1{Style.RESET_ALL}>: ", default="datastore1").strip()
-
                     self.deploy_ovf(host, ovf_file)
+
             elif choice == '2': # Export OVF
                 vm_list = self.list_vms(self.si)
                 if vm_list:
@@ -1641,12 +1685,24 @@ class OVFManager(BaseConfigurator):
             if self.si:
                 Disconnect(self.si)
 
+    def get_target_networks(self, si):
+        """取得 ESXi host 上所有可用的網路名稱"""
+        try:
+            content = si.RetrieveContent()
+            container = content.viewManager.CreateContainerView(content.rootFolder, [vim.Network], True)
+            networks = [net.name for net in container.view]
+            container.Destroy()
+            return sorted(networks)
+        except Exception as e:
+            print(f"{Fore.RED}Error getting available networks: {e}{Style.RESET_ALL}")
+            return []
+
 class VCConfigurator(BaseConfigurator):
     def __init__(self):
         super().__init__()
         self.default_TC_datastore = "datastore1"
         self.default_TC_username = "root"
-        self.default_TC_host = "10.245.43.87"
+        self.default_TC_host = "10.245.42.168"
         self.default_TC_password = "Lenovo-123"   
         self.default_VC_prefix = "22"
         self.default_VC_gateway = "192.168.4.1"
