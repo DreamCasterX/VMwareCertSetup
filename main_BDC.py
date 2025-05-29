@@ -455,7 +455,7 @@ class VIVaConfigurator(BaseConfigurator):
         """Check internet connectivity"""
         print("\nVerifying Internet connectivity...")
         try:
-            cmd = 'wget --spider --timeout=5 www.google.com'
+            cmd = 'wget --spider --timeout=5 www.baidu.com'
             stdin, stdout, stderr = ssh.exec_command(cmd)
             exit_status = stdout.channel.recv_exit_status()
             
@@ -472,6 +472,15 @@ class VIVaConfigurator(BaseConfigurator):
     def configure_hosts_file(self, ssh_client, internal_ip: str) -> bool:
         """Configure /etc/hosts file on VIVa"""
         try:
+            # 1. 檢查並插入 127.0.0.1   photon-viva
+            check_photon = "grep -q '^127\\.0\\.0\\.1[[:space:]]\\+photon-viva' /etc/hosts"
+            stdin, stdout, stderr = ssh_client.exec_command(check_photon)
+            if stdout.channel.recv_exit_status() != 0:
+                # 不存在才插入
+                insert_cmd = "sudo sed -i '/^127\\.0\\.0\\.1[[:space:]]\\+localhost$/a 127.0.0.1   photon-viva' /etc/hosts"
+                ssh_client.exec_command(insert_cmd)
+
+            # 2. 檢查並插入 cert-viva-local
             stdin, stdout, stderr = ssh_client.exec_command(
                 f"grep -q '{internal_ip} cert-viva-local' /etc/hosts"
             )
@@ -643,6 +652,25 @@ SendRelease=no
             return
         print(f"{Fore.GREEN}Hostname configuration successful{Style.RESET_ALL}\n")
 
+        # 取消密碼過期
+        print("\nDisabling password expiration...")
+        try:
+            commands = [
+                'chage -M 99999 root',
+                'chage -E -1 root'
+            ]
+            for cmd in commands:
+                stdin, stdout, stderr = ssh_client.exec_command(cmd)
+                if stdout.channel.recv_exit_status() != 0:
+                    print(f"{Fore.RED}Failed to execute command: {cmd}{Style.RESET_ALL}")
+                    ssh_client.close()
+                    return
+            print(f"{Fore.GREEN}Password expiration disabled successfully{Style.RESET_ALL}\n")
+        except Exception as e:
+            print(f"{Fore.RED}Error disabling password expiration: {e}{Style.RESET_ALL}")
+            ssh_client.close()
+            return
+        
         # 配置 hosts 檔案
         print(f"\nConfiguring /etc/hosts...")
         if not self.configure_hosts_file(ssh_client, internal_ip):
@@ -726,7 +754,7 @@ class AgentConfigurator(BaseConfigurator):
         """Check internet connectivity"""
         print("\nVerifying Internet connectivity...")
         try:
-            cmd = 'wget --spider --timeout=5 www.google.com'
+            cmd = 'wget --spider --timeout=5 www.baidu.com'
             stdin, stdout, stderr = ssh.exec_command(cmd)
             exit_status = stdout.channel.recv_exit_status()
             
@@ -925,20 +953,11 @@ DNS={self.internal_dns}
                 print("Running AgentLauncher...")
                 stdin, stdout, stderr = ssh_client.exec_command("AgentLauncher -i")
 
-                # 追蹤已完成的docker image層數
-                completed_layers = 0
-                total_layers = 0
-
+                # 顯示所有輸出
                 for line in stdout:
                     line = line.strip()
-                    if "Pulling fs layer" in line:
-                        total_layers += 1
-                    elif "Pull complete" in line:
-                        completed_layers += 1
-                        print(f"\rProgress: {completed_layers}/{total_layers} layers completed", end='', flush=True)
-
-                # 最後打印一個換行
-                print()
+                    if line:  # 只打印非空行
+                        print(line)
 
                 # 檢查錯誤
                 for line in stderr:
@@ -1156,7 +1175,7 @@ class PciPassthruConfigurator(BaseConfigurator):
                     
 
         except KeyboardInterrupt:
-            print("\n\nOperation cancelled by user.")
+            print(f"\n\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
         except Exception as e:
             print(f"\n{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         finally:
@@ -1179,7 +1198,7 @@ class OVFManager(BaseConfigurator):
             print(f"{Fore.GREEN}VMware OVF Tool has been installed{Style.RESET_ALL}\n")
             return True
         else:
-            print(f"{Fore.YELLOW}VMware OVF Tool is not installed{Style.RESET_ALL}\n")
+            print(f"{Fore.RED}VMware OVF Tool is not installed{Style.RESET_ALL}\n")
             return False
 
     def list_ovf_files(self) -> list:
@@ -1204,7 +1223,7 @@ class OVFManager(BaseConfigurator):
             ovf_files = self.list_ovf_files()
             
             if not ovf_files:
-                print(f"{Fore.YELLOW}No OVF/OVA files found in current directory{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}No OVF/OVA files found in the current directory{Style.RESET_ALL}")
                 while True:
                     response = input("Please place OVF file in the current directory to continue (y/n): ").strip().lower()
                     if response in ['y', 'n']:
@@ -1218,6 +1237,7 @@ class OVFManager(BaseConfigurator):
             if len(ovf_files) == 1:
                 return ovf_files[0]
             
+            # 存在兩個以上的OVF才顯示選單
             print("\nAvailable OVF file(s) (oldest to newest):")
             for i, file in enumerate(ovf_files, 1):
                 print(f"  {i}) {file}")
@@ -1678,7 +1698,7 @@ class OVFManager(BaseConfigurator):
                         self.delete_vm(vm_name)
 
         except KeyboardInterrupt:
-            print(f"\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
+            print(f"\n\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
         except Exception as e:
             print(f"\n{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         finally:
@@ -1901,7 +1921,7 @@ class VCConfigurator(BaseConfigurator):
         iso_files = [f for f in os.listdir(current_dir) if f.lower().endswith('.iso')]
 
         if not iso_files:
-            print(f"{Fore.YELLOW}VCSA ISO file not found in the current directory.{Style.RESET_ALL}")
+            print(f"{Fore.RED}VCSA ISO file not found in the current directory.{Style.RESET_ALL}")
 
         while True:   
             if not iso_files:
@@ -1919,7 +1939,28 @@ class VCConfigurator(BaseConfigurator):
             else:
                 break
 
-        iso_path = os.path.join(current_dir, iso_files[0])
+        # 顯示可用的 ISO 文件並讓用戶選擇
+        if len(iso_files) == 1:
+            selected_iso = iso_files[0]
+        else:
+            # 存在兩個以上的ISO才顯示選單
+            print("\nAvailable ISO files:")
+            for i, iso_file in enumerate(iso_files, 1):
+                print(f"  {i}) {iso_file}")
+
+            while True:
+                try:
+                    choice = input("\nEnter ISO file number: ").strip()
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(iso_files):
+                        selected_iso = iso_files[idx]
+                        break
+                    else:
+                        print(f"{Fore.YELLOW}Please enter a number between 1 and {len(iso_files)}{Style.RESET_ALL}")
+                except ValueError:
+                    print(f"{Fore.YELLOW}Please enter a valid number{Style.RESET_ALL}")
+
+        iso_path = os.path.join(current_dir, selected_iso)
 
         # 配置TC
         while True:
@@ -2213,41 +2254,49 @@ class ResultLogCopier(BaseConfigurator):
                 print(f"{Fore.RED}No second level directories found{Style.RESET_ALL}")
                 return
 
-            # 列出並選擇測試案例
-            test_case = self.list_test_cases(ssh_client, f"/results/{first_level}/{second_level}")
-            if not test_case:
-                return
+            while True:
+                # 列出並選擇測試案例
+                test_case = self.list_test_cases(ssh_client, f"/results/{first_level}/{second_level}")
+                if not test_case:
+                    break
 
-            # 獲取第四層最新目錄
-            fourth_level = self.get_latest_directory(ssh_client, f"/results/{first_level}/{second_level}/{test_case}")
-            if not fourth_level:
-                print(f"{Fore.RED}No run logs found{Style.RESET_ALL}")
-                return
+                # 獲取第四層最新目錄
+                fourth_level = self.get_latest_directory(ssh_client, f"/results/{first_level}/{second_level}/{test_case}")
+                if not fourth_level:
+                    print(f"{Fore.RED}No run logs found{Style.RESET_ALL}")
+                    continue
 
-            # 構建完整的遠端路徑
-            remote_path = f"/results/{first_level}/{second_level}/{test_case}/{fourth_level}/run.log"
-            
-            # 檢查run.log是否存在
-            stdin, stdout, stderr = ssh_client.exec_command(f"test -f {remote_path} && echo 'exists'")
-            if not stdout.read().decode().strip():
-                print(f"{Fore.RED}run.log not found at {remote_path}{Style.RESET_ALL}")
-                return
+                # 構建完整的遠端路徑
+                remote_path = f"/results/{first_level}/{second_level}/{test_case}/{fourth_level}/run.log"
+                
+                # 檢查run.log是否存在
+                stdin, stdout, stderr = ssh_client.exec_command(f"test -f {remote_path} && echo 'exists'")
+                if not stdout.read().decode().strip():
+                    print(f"{Fore.RED}run.log not found at {remote_path}{Style.RESET_ALL}")
+                    continue
 
-            # 建立本地目錄結構，並處理非法字元
-            safe_test_case = self.sanitize_filename(test_case)
-            safe_fourth_level = self.sanitize_filename(fourth_level)
-            local_dir = os.path.join(os.getcwd(), safe_test_case, safe_fourth_level)
-            os.makedirs(local_dir, exist_ok=True)
-            local_path = os.path.join(local_dir, "run.log")
+                # 建立本地目錄結構，並處理非法字元
+                safe_test_case = self.sanitize_filename(test_case)
+                safe_fourth_level = self.sanitize_filename(fourth_level)
+                local_dir = os.path.join(os.getcwd(), safe_test_case, safe_fourth_level)
+                os.makedirs(local_dir, exist_ok=True)
+                local_path = os.path.join(local_dir, "run.log")
 
-            # 複製文件
-            print(f"\nCopying run.log to {local_path}...")
-            if self.copy_run_log(ssh_client, remote_path, local_path):
-                print(f"{Fore.GREEN}Successfully copied run.log{Style.RESET_ALL}")
-                print(f"\nFile location: {Fore.CYAN}{local_path}{Style.RESET_ALL}")
-            else:
-                print(f"{Fore.RED}Failed to copy run.log{Style.RESET_ALL}")
+                # 複製文件
+                print(f"\nCopying run.log to {local_path}...")
+                if self.copy_run_log(ssh_client, remote_path, local_path):
+                    print(f"{Fore.GREEN}Successfully copied run.log{Style.RESET_ALL}")
+                    print(f"\nFile location: {Fore.CYAN}{local_path}{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.RED}Failed to copy run.log{Style.RESET_ALL}")
 
+                # 詢問是否繼續
+                while True:
+                    cont = input(f"\nContinue to copy another test case? (y/n): ").strip().lower()
+                    if cont in ['y', 'n']:
+                        break
+                if cont != 'y':
+                    break
         except Exception as e:
             print(f"{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         finally:
@@ -2258,14 +2307,14 @@ def show_menu():
     r"""
  =======================================
  VMware Cert Test Environment Setup Tool 
-                 v1.4 
+                 v1.5 
  =======================================
 
 Please select an option:
 1) Config SUT
 2) Config VIVa
 3) Config Agent
-4) Config vCenter
+4) Deploy vCenter
 5) Deploy/Export OVF
 6) Copy agent log
 7) Exit
@@ -2308,7 +2357,7 @@ def main():
                 configurator = ResultLogCopier()
                 configurator.configure()
         except KeyboardInterrupt:
-            print("\n\nOperation cancelled by user.")
+            print(f"\n\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
         except Exception as e:
             print(f"{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         
@@ -2318,5 +2367,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\nOperation cancelled by user.")
+        print(f"\n\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
         sys.exit(0)
