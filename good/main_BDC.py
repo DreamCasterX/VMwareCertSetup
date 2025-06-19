@@ -437,7 +437,7 @@ class SUTConfigurator(BaseConfigurator):
 
         print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
         print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
-        print(f"\nRemember to create a new host {Fore.YELLOW}{dns_hostname}{Style.RESET_ALL} with IP {Fore.YELLOW}{static_ip}{Style.RESET_ALL} on DHCP server.")
+        print(f"\nRemember to add a DNS host record {Fore.YELLOW}{dns_hostname}{Style.RESET_ALL} with IP {Fore.YELLOW}{static_ip}{Style.RESET_ALL} on DNS server.")
 
 class VIVaConfigurator(BaseConfigurator):
     # MTY的VIVa/agent/跳板機都給了兩個網路, 一個是對內的192.168.1.x, (vnic10: mty.com) 一個是對外的10.240.226.x (VM Network: labs.lenovo.com)
@@ -953,25 +953,23 @@ DNS={self.internal_dns}
                 print("Running AgentLauncher...")
                 stdin, stdout, stderr = ssh_client.exec_command("AgentLauncher -i")
 
-                # 追蹤已完成的docker image層數
-                completed_layers = 0
-                total_layers = 0
-
+                # 顯示所有輸出
                 for line in stdout:
                     line = line.strip()
-                    if "Pulling fs layer" in line:
-                        total_layers += 1
-                    elif "Pull complete" in line:
-                        completed_layers += 1
-                        print(f"\rProgress: {completed_layers}/{total_layers} layers completed", end='', flush=True)
-
-                # 最後打印一個換行
-                print()
+                    if line:  # 只打印非空行
+                        print(line)
 
                 # 檢查錯誤
                 for line in stderr:
                     print(f"Error: {line.strip()}")
                     
+                # 檢查 AgentLauncher 是否成功
+                exit_status = stdout.channel.recv_exit_status()
+                if exit_status != 0:
+                    print(f"{Fore.RED}AgentLauncher failed with exit code {exit_status}{Style.RESET_ALL}")
+                    ssh_client.close()
+                    return
+                
                 success, new_ssh_client = self.configure_internal_network_config(
                     ssh_client, internal_ip
                 )
@@ -1920,7 +1918,7 @@ class VCConfigurator(BaseConfigurator):
  <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Downloaded the VCSA image (.iso) and placed it in the current directory
-    2. Created a DNS hostname and IP for vCenter VM on DHCP server (ex: vc50 -> 192.168.4.50)
+    2. Added a DNS host record for vCenter VM on DNS server (ex: vc50 -> 192.168.4.50)
  _________________________________________________________________________________________{Style.RESET_ALL}
     """
         )

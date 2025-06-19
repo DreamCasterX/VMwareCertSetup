@@ -17,6 +17,7 @@ import json
 import tarfile
 import xml.etree.ElementTree as ET
 
+
 # Initialize colorama
 init()
 
@@ -44,7 +45,7 @@ class BaseConfigurator(ABC):
         """獲取有效的用戶輸入"""
         while True:
             value = input(prompt)
-            if not value:  # 輸入不能是空白
+            if not value:
                 if default is not None:
                     return default
                 continue
@@ -437,7 +438,7 @@ class SUTConfigurator(BaseConfigurator):
 
         print(f"\n\n\n{Fore.GREEN}***************************************{Style.RESET_ALL}")
         print(f"{Fore.GREEN}All configurations have been completed!{Style.RESET_ALL}")
-        print(f"\nRemember to create a new host {Fore.YELLOW}{dns_hostname}{Style.RESET_ALL} with IP {Fore.YELLOW}{static_ip}{Style.RESET_ALL} on DHCP server.")
+        print(f"\nRemember to add a DNS host record {Fore.YELLOW}{dns_hostname}{Style.RESET_ALL} with IP {Fore.YELLOW}{static_ip}{Style.RESET_ALL} on DNS server.")
 
 class VIVaConfigurator(BaseConfigurator):
     # MTY的VIVa/agent/跳板機都給了兩個網路, 一個是對內的192.168.1.x, (vnic10: mty.com) 一個是對外的10.240.226.x (VM Network: labs.lenovo.com)
@@ -733,6 +734,7 @@ SendRelease=no
                 pyperclip.copy(url)
                 print(f"\nEnsure the jump server has Internet connectivity, then open your browser and press 'Ctrl + V' to visit {Fore.CYAN}{url}{Style.RESET_ALL}")
                 print(f"\nOn the web UI, download the {Fore.CYAN}Agent image (.ova){Style.RESET_ALL} and {Fore.CYAN}Runlist (.json){Style.RESET_ALL} after filling in all the required data")
+
             else:
                 print(f"{Fore.RED}Internet connectivity check failed{Style.RESET_ALL}\n")
         else:
@@ -972,6 +974,13 @@ DNS={self.internal_dns}
                 for line in stderr:
                     print(f"Error: {line.strip()}")
                     
+                # 檢查 AgentLauncher 是否成功
+                exit_status = stdout.channel.recv_exit_status()
+                if exit_status != 0:
+                    print(f"{Fore.RED}AgentLauncher failed with exit code {exit_status}{Style.RESET_ALL}")
+                    ssh_client.close()
+                    return
+                    
                 success, new_ssh_client = self.configure_internal_network_config(
                     ssh_client, internal_ip
                 )
@@ -985,6 +994,7 @@ DNS={self.internal_dns}
                     url = f"https://{internal_ip}/agent-ui"
                     pyperclip.copy(url)
                     print(f"\nOpen your browser and press 'Ctrl + V' to visit {Fore.CYAN}{url}{Style.RESET_ALL} for Agent web UI access.")
+
             
                 else:
                     print(f"{Fore.RED}Internal network configuration failed{Style.RESET_ALL}\n")
@@ -1020,110 +1030,105 @@ class PciPassthruConfigurator(BaseConfigurator):
             # 找到主機系統
             host = vm.runtime.host
             
-            # 尋找 NVIDIA GPU PCI 設備
-            nvidia_device = None
+            # 找到所有 NVIDIA GPU PCI 設備
+            nvidia_devices = []
             for pci_dev in host.hardware.pciDevice:
                 if "NVIDIA" in pci_dev.vendorName:
-                    nvidia_device = pci_dev
-                    print(f"\nFound NVIDIA GPU:")
+                    nvidia_devices.append(pci_dev)
+                    print(f"\nFound NVIDIA PCI device:")
                     print(f"  Device Name: {Fore.LIGHTCYAN_EX}{pci_dev.deviceName}{Style.RESET_ALL}")
                     print(f"  Vendor Name: {Fore.LIGHTCYAN_EX}{pci_dev.vendorName}{Style.RESET_ALL}")
                     print(f"  Device ID: {Fore.LIGHTCYAN_EX}{hex(pci_dev.deviceId)}{Style.RESET_ALL}")
                     print(f"  Vendor ID: {Fore.LIGHTCYAN_EX}{hex(pci_dev.vendorId)}{Style.RESET_ALL}")
                     print(f"  PCI ID: {Fore.LIGHTCYAN_EX}{pci_dev.id}{Style.RESET_ALL}\n")
-                    break
-            
-            if not nvidia_device:
-                print(f"{Fore.RED}No NVIDIA GPU found on the host{Style.RESET_ALL}")
+
+            if not nvidia_devices:
+                print(f"{Fore.RED}No NVIDIA PCI device found on the host{Style.RESET_ALL}")
                 return
 
-            # 啟用 PCI 設備的 passthrough
+            # 確認是否要啟用所有NVIDIA GPU的passthrough
+            while True:
+                confirm = input(f"Do you want to enable passthrough for above {Fore.LIGHTCYAN_EX}{len(nvidia_devices)}{Style.RESET_ALL} NVIDIA devices? (y/n): ").strip().lower()
+                if confirm in ['y', 'n']:
+                    break
+            if confirm != 'y':
+                return
+
+            # 啟用所有 NVIDIA GPU PCI 設備的 passthrough
             passthru_sys = host.configManager.pciPassthruSystem
             if passthru_sys:
                 # 創建 passthrough 配置
-                config = vim.host.PciPassthruConfig()
-                config.id = nvidia_device.id
-                config.passthruEnabled = True
-                
+                configs = []
+                for dev in nvidia_devices:
+                    config = vim.host.PciPassthruConfig()
+                    config.id = dev.id
+                    config.passthruEnabled = True
+                    configs.append(config)
                 try:
                     # 更新 PCI passthrough 配置
-                    passthru_sys.UpdatePassthruConfig([config])
-                    print(f"{Fore.GREEN}Successfully updated PCI passthrough configuration{Style.RESET_ALL}")
+                    passthru_sys.UpdatePassthruConfig(configs)
+                    print(f"{Fore.GREEN}Successfully updated PCI passthrough configuration for all NVIDIA devices{Style.RESET_ALL}")
                 except Exception as e:
                     print(f"{Fore.RED}Failed to update PCI passthrough config: {e}{Style.RESET_ALL}")
                     return
-            
-            try:
-                # 創建 VM 配置
-                vm_config_spec = vim.vm.ConfigSpec()
-                
-                # 添加 PCI passthrough 設備
+
+            # 為每個 NVIDIA 設備都加到 VM
+            device_changes = []
+            for dev in nvidia_devices:
                 pci_spec = vim.vm.device.VirtualDeviceSpec()
                 pci_spec.operation = vim.vm.device.VirtualDeviceSpec.Operation.add
-                
                 pci_device = vim.vm.device.VirtualPCIPassthrough()
                 pci_device.backing = vim.vm.device.VirtualPCIPassthrough.DeviceBackingInfo()
-                pci_device.backing.id = nvidia_device.id
-                pci_device.backing.deviceId = hex(nvidia_device.deviceId)[2:].zfill(4)
+                pci_device.backing.id = dev.id
+                pci_device.backing.deviceId = hex(dev.deviceId)[2:].zfill(4)
                 pci_device.backing.systemId = host.hardware.systemInfo.uuid
-                pci_device.backing.vendorId = nvidia_device.vendorId
-                
-                # 設置設備的鍵值
-                pci_device.key = -1  # 讓 vSphere 自動分配鍵值
-                
+                pci_device.backing.vendorId = dev.vendorId
+                pci_device.key = -1
                 pci_spec.device = pci_device
-                
-                # 更新設備配置列表
-                vm_config_spec.deviceChange = [pci_spec]
-                
-                print(f"\nAttempting to add PCI device to VM {Fore.CYAN}'{vm_name}'{Style.RESET_ALL}...")
-                
-                # 重新配置 VM
-                task = vm.ReconfigVM_Task(spec=vm_config_spec)
-                
-                # 等待任務完成
-                while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
-                    pass
-                
-                if task.info.state == vim.TaskInfo.State.success:
-                    print(f"{Fore.GREEN}Successfully added PCI passthrough device to '{vm_name}'{Style.RESET_ALL}")
-                    
-                    # 添加 VM 選項
-                    try:
-                        vm_config_spec = vim.vm.ConfigSpec()
-                        vm_config_spec.extraConfig = [
-                            vim.option.OptionValue(key='pciHole.start', value='2048'),
-                            vim.option.OptionValue(key='pciPassthru.use64bitMMIO', value='TRUE'),
-                            vim.option.OptionValue(key='pciPassthru.64bitMMIOSizeGB', value='256')
-                        ]
-                        
-                        # 添加記憶體預留鎖定選項
-                        vm_config_spec.memoryReservationLockedToMax = True
-                        
-                        print(f"\nAdding VM options to {Fore.CYAN}'{vm_name}'{Style.RESET_ALL}...")
-                        
-                        # 重新配置 VM
-                        task = vm.ReconfigVM_Task(spec=vm_config_spec)
-                        
-                        # 等待任務完成
-                        while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
-                            pass
-                        
-                        if task.info.state == vim.TaskInfo.State.success:
-                            print(f"{Fore.GREEN}Successfully added VM options to '{vm_name}'{Style.RESET_ALL}")
-                        else:
-                            print(f"{Fore.RED}Failed to add VM options: {task.info.error}{Style.RESET_ALL}")
-                            
-                    except Exception as e:
-                        print(f"{Fore.RED}Error adding VM options: {e}{Style.RESET_ALL}")
-                else:
-                    print(f"{Fore.RED}Failed to add PCI passthrough device to VM: {task.info.error}{Style.RESET_ALL}")
-                    return
-                    
-            except Exception as e:
-                print(f"{Fore.RED}Error adding PCI device to VM: {e}{Style.RESET_ALL}")
+                device_changes.append(pci_spec)
+
+            vm_config_spec = vim.vm.ConfigSpec()
+            vm_config_spec.deviceChange = device_changes
+
+            print(f"\nAttempting to add {len(nvidia_devices)} PCI device(s) to VM {Fore.CYAN}'{vm_name}'{Style.RESET_ALL}...")
+
+            # 重新配置 VM
+            task = vm.ReconfigVM_Task(spec=vm_config_spec)
+            while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                pass
+
+            if task.info.state == vim.TaskInfo.State.success:
+                print(f"{Fore.GREEN}Successfully added PCI passthrough device(s) to '{vm_name}'{Style.RESET_ALL}")
+
+                # 設定 VM 選項
+                mmio_size = '2048' if len(nvidia_devices) > 1 else '256'
+                try:
+                    vm_config_spec = vim.vm.ConfigSpec()
+                    extra_config = [
+                        vim.option.OptionValue(key='pciHole.start', value='2048'),
+                        vim.option.OptionValue(key='pciPassthru.use64bitMMIO', value='TRUE'),
+                        vim.option.OptionValue(key='pciPassthru.64bitMMIOSizeGB', value=mmio_size)
+                    ]
+                    if len(nvidia_devices) > 1:
+                        extra_config.append(vim.option.OptionValue(key='pciPassthru.allowP2P', value='TRUE'))
+                    vm_config_spec.extraConfig = extra_config
+
+                    # 勾選保留記憶體(全部鎖定)
+                    vm_config_spec.memoryReservationLockedToMax = True
+                    print(f"\nAdding VM options to {Fore.CYAN}'{vm_name}'{Style.RESET_ALL}...")
+                    task = vm.ReconfigVM_Task(spec=vm_config_spec)
+                    while task.info.state not in [vim.TaskInfo.State.success, vim.TaskInfo.State.error]:
+                        pass
+                    if task.info.state == vim.TaskInfo.State.success:
+                        print(f"{Fore.GREEN}Successfully added VM options to '{vm_name}'{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}Failed to add VM options: {task.info.error}{Style.RESET_ALL}")
+                except Exception as e:
+                    print(f"{Fore.RED}Error adding VM options: {e}{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.RED}Failed to add PCI passthrough device(s) to VM: {task.info.error}{Style.RESET_ALL}")
                 return
-                
+                    
         except Exception as e:
             print(f"{Fore.RED}Error adding VM options: {e}{Style.RESET_ALL}")
 
@@ -1145,14 +1150,14 @@ class PciPassthruConfigurator(BaseConfigurator):
 
         try:
             while True:
-                host = self.get_valid_input("Enter Host IP address: ")
+                host = self.get_valid_input("Enter ESXi host IP address: ")
                 if host:
                     if not self.validate_ip(host):
                         print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
                         continue
 
                     # 保留彈性讓user自行輸入密碼或直接用預設 (若不想讓user設定可直接刪除下面這行)
-                    self.password = self.get_valid_input(f"Enter Host password <press Enter to accept default {Fore.CYAN}Admin!23{Style.RESET_ALL}>: ", default="Admin!23").strip()
+                    self.password = self.get_valid_input(f"Enter Host password <press Enter to accept default {Fore.CYAN}Passw0rd!{Style.RESET_ALL}>: ", default="Passw0rd!").strip()
 
                     # 測試連線
                     connected, self.si = self.test_connection(host, self.user, self.password)
@@ -1166,7 +1171,7 @@ class PciPassthruConfigurator(BaseConfigurator):
                 while True:
                     vm_input = input("\nEnter VM number (or 'q' to quit): ").strip()
                     if vm_input.lower() == 'q':
-                        break
+                        return
                     
                     try:
                         # 嘗試將輸入轉換為數字
@@ -1905,7 +1910,7 @@ class VCConfigurator(BaseConfigurator):
  <Prerequisites>
  To move forward, make sure you've already completed the following:
     1. Downloaded the VCSA image (.iso) and placed it in the current directory
-    2. Created a DNS hostname and IP for vCenter VM on DHCP server (ex: vc50 -> 192.168.4.50)
+    2. Added a DNS host record for vCenter VM on DNS server (ex: vc50 -> 192.168.4.50)
  _________________________________________________________________________________________{Style.RESET_ALL}
     """
         )
@@ -2129,6 +2134,7 @@ class VCConfigurator(BaseConfigurator):
                 print(f"\n   - vCenter Client UI: {Fore.CYAN}{url_vcsa}{Style.RESET_ALL}")
                 print(f"\nLogin with user name: {Fore.CYAN}administrator@vsphere.local{Style.RESET_ALL} and password: {Fore.CYAN}{sso_password}{Style.RESET_ALL}\n")
 
+
     def get_available_networks(self, si):
         """獲取 ESXi host 上可用的網路"""
         try:
@@ -2310,12 +2316,305 @@ class ResultLogCopier(BaseConfigurator):
         finally:
             ssh_client.close()
 
+class DNSConfigurator(BaseConfigurator):
+    def __init__(self):
+        super().__init__()
+        self.default_dns_server = "192.168.4.1"  # 預設 DNS 伺服器 IP
+        self.default_zone = "lenovo.com"         # 預設 DNS 區域
+        self.username = "Administrator"          # 預設 DNS 伺服器使用者名稱
+        self.password = "Admin!23"               # 預設 DNS 伺服器密碼
+
+    def get_and_display_dns_records(self, ssh_client, zone: str, display_mode: str = "table", display_header: bool = True) -> list | bool:
+        """根據 display_mode 顯示指定區域的 DNS A 記錄，並返回列表 (json 模式下) 或布林值 (table 模式下)"""
+        try:
+            if display_mode == "table":
+                cmd = f'powershell -Command "Get-DnsServerResourceRecord -ZoneName \"{zone}\" | Where-Object {{ $_.RecordType -eq \'A\' }} | Select-Object HostName, @{{Name=\'IP Address\';Expression={{ $_.RecordData.IPv4Address.ToString() }}}} | Format-Table -AutoSize"'
+            elif display_mode == "json":
+                cmd = f'powershell -Command "Get-DnsServerResourceRecord -ZoneName \"{zone}\" | Where-Object {{ $_.RecordType -eq \'A\' }} | Select-Object HostName, @{{Name=\'IPAddress\';Expression={{ $_.RecordData.IPv4Address.ToString() }}}} | ConvertTo-Json -Compress"'
+            else:
+                print(f"{Fore.RED}Invalid display_mode: {display_mode}{Style.RESET_ALL}")
+                return False if display_mode == "table" else []
+
+            if display_header:
+                print(f"\nCurrent DNS records in zone {Fore.CYAN}{zone}{Style.RESET_ALL}:")
+                print(f"{'-'*45}")
+            
+            stdin, stdout, stderr = ssh_client.exec_command(cmd)
+            output = stdout.read().decode().strip()
+            error = stderr.read().decode().strip()
+            exit_status = stdout.channel.recv_exit_status()
+
+            if exit_status != 0:
+                print(f"{Fore.RED}Error getting DNS records: {error}{Style.RESET_ALL}")
+                return False if display_mode == "table" else []
+
+            if display_mode == "table":
+                if output:
+                    print(output)
+                else:
+                    print(f"{Fore.YELLOW}No A records found in zone{Style.RESET_ALL}")
+                if display_header: # Print bottom separator only if header was displayed
+                    print(f"{'-'*45}")
+                return True
+            elif display_mode == "json":
+                if output:
+                    try:
+                        records = json.loads(output)
+                        if not isinstance(records, list):
+                            records = [records]
+                    except json.JSONDecodeError as e:
+                        print(f"{Fore.RED}Error decoding JSON output: {e}\nOutput: {output}{Style.RESET_ALL}")
+                        return []
+                    return records
+                else:
+                    print(f"{Fore.YELLOW}No A records found in zone{Style.RESET_ALL}")
+                    return []
+        except Exception as e:
+            print(f"{Fore.RED}Error getting DNS records: {e}{Style.RESET_ALL}")
+            return False if display_mode == "table" else []
+
+    def add_dns_host(self, ssh_client, zone: str, hostname: str, ip_address: str) -> bool:
+        """使用遠端 dnscmd 添加 DNS 主機記錄"""
+        try:
+            fqdn = f"{hostname}.{zone}"
+            cmd = f'dnscmd . /recordadd {zone} {hostname} A {ip_address}'
+            
+            print(f"\nAdding DNS record: {Fore.CYAN}{fqdn} -> {ip_address}{Style.RESET_ALL}")
+            
+            stdin, stdout, stderr = ssh_client.exec_command(cmd)
+            channel = stdout.channel
+
+            timeout_seconds = 30
+            start_time = time.time()
+
+            # Wait for the command to finish or timeout
+            while not channel.exit_status_ready():
+                if time.time() - start_time > timeout_seconds:
+                    print(f"{Fore.RED}Command timed out after {timeout_seconds} seconds.{Style.RESET_ALL}")
+                    # Attempt to read any remaining output if it timed out
+                    error = stderr.read().decode().strip()
+                    output = stdout.read().decode().strip()
+                    if output:
+                        print(f"{Fore.YELLOW}Command Output (before timeout):\n{output}{Style.RESET_ALL}")
+                    if error:
+                        print(f"{Fore.RED}Command Error (before timeout):\n{error}{Style.RESET_ALL}")
+                    return False # Report failure due to timeout
+                time.sleep(0.5) # Wait a bit before checking again
+
+            # If we reach here, the command has finished (exit_status_ready is True)
+            
+            # Read stderr first to capture errors immediately
+            error = stderr.read().decode().strip()
+            output = stdout.read().decode().strip() # Ensure stdout is fully read
+
+            exit_status = stdout.channel.recv_exit_status() # Get exit status after reading streams
+            
+            if exit_status == 0:
+                print(f"{Fore.GREEN}Successfully added DNS record{Style.RESET_ALL}")
+                return True
+            else:
+                print(f"{Fore.RED}Failed to add DNS record: {error}{Style.RESET_ALL}")
+                return False
+                
+        except Exception as e:
+            print(f"{Fore.RED}Error adding DNS record: {e}{Style.RESET_ALL}")
+            return False
+
+    def configure_network(self, ssh_client, new_ip, subnet_mask, gateway):
+        """DNS Configurator 不需要網路配置"""
+        pass
+
+    def delete_dns_host(self, ssh_client, zone: str, hostname: str) -> bool:
+        """使用遠端 dnscmd 刪除 DNS 主機記錄"""
+        try:
+            cmd = f'dnscmd . /recorddelete {zone} {hostname} A /f'
+            
+            print(f"\nDeleting DNS record: {Fore.CYAN}{hostname}.{zone}{Style.RESET_ALL}")
+            
+            stdin, stdout, stderr = ssh_client.exec_command(cmd)
+            
+            # Read stderr first to capture errors immediately
+            error = stderr.read().decode().strip()
+            output = stdout.read().decode().strip() # Ensure stdout is fully read
+
+            exit_status = stdout.channel.recv_exit_status() # Get exit status after reading streams
+            
+            if exit_status == 0:
+                print(f"{Fore.GREEN}Successfully deleted DNS record{Style.RESET_ALL}")
+                return True
+            else:
+                # Print stdout and stderr for debugging
+                if output:
+                    print(f"{Fore.YELLOW}Command Output:\n{output}{Style.RESET_ALL}")
+                if error:
+                    print(f"{Fore.RED}Command Error:\n{error}{Style.RESET_ALL}")
+                print(f"{Fore.RED}Failed to delete DNS record (exit code: {exit_status}){Style.RESET_ALL}")
+                return False
+                
+        except Exception as e:
+            print(f"{Fore.RED}Error deleting DNS record: {e}{Style.RESET_ALL}")
+            return False
+
+    def configure(self):
+        print(
+        f"""{Fore.YELLOW}
+ ___________________________________________________________________
+ <Prerequisites>
+ To move forward, make sure you've already completed the following:
+    1. Ensure SSH service is enabled and running on the DNS server
+ ___________________________________________________________________{Style.RESET_ALL}
+    """
+        )
+        
+        # Initialize ssh_client outside the try block
+        ssh_client = None
+        try:
+            # Display submenu
+            print("\n1) Add DNS host record")
+            print("2) Delete DNS host record\n")
+            while True:
+                mgmt_choice = input("Enter your choice (1-2): ").strip()
+                if mgmt_choice in ['1', '2']:
+                    break
+
+            # Get DNS server info
+            while True:
+                dns_server = input(f"Enter DNS server IP <press Enter to accept default {Fore.CYAN}{self.default_dns_server}{Style.RESET_ALL}>: ").strip()
+                if dns_server == "":
+                    dns_server = self.default_dns_server
+                if self.validate_ip(dns_server):
+                    if self.ping_check(dns_server):
+                        break
+                    else:
+                        print(f"{Fore.RED}Failed to ping DNS server{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+
+            # Get DNS server credentials
+            username = input(f"Enter DNS server username <press Enter to accept default {Fore.CYAN}{self.username}{Style.RESET_ALL}>: ").strip()
+            if username == "":
+                username = self.username
+
+            password = input(f"Enter DNS server password <press Enter to accept default {Fore.CYAN}{self.password}{Style.RESET_ALL}>: ").strip()
+            if password == "":
+                password = self.password
+
+            # Establish SSH connection
+            print("\nConnecting to DNS server...")
+            ssh_client = self.ssh_connect(dns_server, username, password)
+            if not ssh_client:
+                print(f"{Fore.RED}Failed to connect to DNS server{Style.RESET_ALL}")
+                return # Exit DNS configure flow if connection fails
+
+            if mgmt_choice == '1':
+                # Add DNS record flow
+                while True:
+                    zone = input(f"Enter DNS zone <press Enter to accept default {Fore.CYAN}{self.default_zone}{Style.RESET_ALL}>: ").strip()
+                    if zone == "":
+                        zone = self.default_zone
+
+                    # Display records and get validation status
+                    zone_is_valid = self.get_and_display_dns_records(ssh_client, zone, display_mode="table", display_header=True)
+
+                    if zone_is_valid:
+                        break
+                    else:
+                        print(f"{Fore.YELLOW}Invalid zone or no records found. Please try again.{Style.RESET_ALL}")
+
+                while True:
+                    hostname = input("Enter hostname (without domain) to add: ").strip()
+                    if not hostname:
+                        print(f"{Fore.YELLOW}Hostname cannot be empty{Style.RESET_ALL}")
+                        continue
+
+                    while True:
+                        ip_address = input("Enter IP address to bind: ").strip()
+                        if self.validate_ip(ip_address):
+                            break
+                        else:
+                            print(f"{Fore.YELLOW}Invalid IP format{Style.RESET_ALL}")
+
+                    if self.add_dns_host(ssh_client, zone, hostname, ip_address):
+                        print(f"\nRecord details:")
+                        print(f"  Hostname: {Fore.CYAN}{hostname}.{zone}{Style.RESET_ALL}")
+                        print(f"  IP Address: {Fore.CYAN}{ip_address}{Style.RESET_ALL}")
+
+                        print("\nUpdating DNS records....")
+                        self.get_and_display_dns_records(ssh_client, zone, display_mode="table", display_header=True)
+                    
+                    continue # 繼續詢問下一筆
+
+            elif mgmt_choice == '2':
+                # Delete DNS record flow
+                while True:
+                    zone = input(f"Enter DNS zone <press Enter to accept default {Fore.CYAN}{self.default_zone}{Style.RESET_ALL}>: ").strip()
+                    if zone == "":
+                        zone = self.default_zone
+
+                    # Display records and get validation status
+                    zone_is_valid = self.get_and_display_dns_records(ssh_client, zone, display_mode="json", display_header=False)
+
+                    if zone_is_valid:
+                        break
+                    else:
+                        print(f"{Fore.YELLOW}Invalid zone or no records found. Please try again.{Style.RESET_ALL}")
+
+                while True:
+                    # Fetch records in JSON mode without header for internal processing
+                    records_to_delete = self.get_and_display_dns_records(ssh_client, zone, display_mode="json", display_header=True)
+                    if not records_to_delete:
+                        print(f"{Fore.YELLOW}No records to delete or failed to retrieve records.{Style.RESET_ALL}")
+                        break
+
+                    for i, record in enumerate(records_to_delete, 1):
+                        hostname = record.get('HostName', 'N/A')
+                        ip_address = record.get('IPAddress', 'N/A')
+                        max_hostname_len = max(len(r.get('HostName', 'N/A')) for r in records_to_delete) if records_to_delete else 0
+                        display_hostname_len = max(max_hostname_len, 20) # Set a sensible minimum
+                        print(f"  {i}) {hostname.ljust(display_hostname_len)} {ip_address}")
+                    print(f"{'-'*45}") # 最下方顯示分割線
+
+                    while True:
+                        try:
+                            delete_choice = input("Enter the number of the record to delete: ").strip()
+                            delete_index = int(delete_choice) - 1
+                            if 0 <= delete_index < len(records_to_delete):
+                                hostname_to_delete = records_to_delete[delete_index].get('HostName')
+                                if hostname_to_delete:
+                                     if self.delete_dns_host(ssh_client, zone, hostname_to_delete):
+                                         print("\nUpdating DNS records...")
+                                         self.get_and_display_dns_records(ssh_client, zone, display_mode="json", display_header=False)
+                                     break
+                                else:
+                                     print(f"{Fore.RED}Could not get hostname for selected record.{Style.RESET_ALL}")
+                                     break
+                            else:
+                                print(f"{Fore.YELLOW}Please enter a valid number.{Style.RESET_ALL}")
+                        except ValueError:
+                            print(f"{Fore.YELLOW}Please enter a valid number.{Style.RESET_ALL}")
+                        
+                        while True:
+                            cont_delete = input("Delete another record? (y/n): ").strip().lower()
+                            if cont_delete in ['y', 'n']:
+                                break
+                            print(f"{Fore.YELLOW}Please enter 'y' or 'n'{Style.RESET_ALL}")
+                        
+                        if cont_delete != 'y':
+                            break
+        except KeyboardInterrupt:
+            print(f"\n\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"\n{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
+        finally:
+            if ssh_client and ssh_client.get_transport() and ssh_client.get_transport().is_active():
+                ssh_client.close()
+
 def show_menu():
     print(
     r"""
  =======================================
  VMware Cert Test Environment Setup Tool 
-                 v1.5 
+                 v1.6 
  =======================================
 
 Please select an option:
@@ -2323,23 +2622,24 @@ Please select an option:
 2) Config VIVa
 3) Config Agent
 4) Deploy vCenter
-5) Add PCI Passthrough VM Options (NVIDIA GPU)
-6) Deploy/Export OVF
-7) Copy agent log
-8) Exit
+5) Deploy/Export OVF
+6) Manage DNS host record
+7) Enable PCI passthrough for NVIDIA GPU
+8) Copy Agent execution log
+9) Exit
 
 """
     )
     while True:
-        choice = input("Enter your choice (1-8): ").strip()
-        if choice in ['1', '2', '3', '4', '5', '6', '7', '8']:
+        choice = input("Enter your choice (1-9): ").strip()
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9']:
             return choice
 
 def main():
     while True:
         choice = show_menu()
         
-        if choice == '8':
+        if choice == '9':
             print("\nExiting...")
             break
             
@@ -2357,14 +2657,18 @@ def main():
                 configurator = VCConfigurator()
                 configurator.configure()
             elif choice == '5':
-                configurator = PciPassthruConfigurator()
-                configurator.configure()
-            elif choice == '6':
                 configurator = OVFManager()
                 configurator.configure()
+            elif choice == '6':
+                configurator = DNSConfigurator()
+                configurator.configure()
             elif choice == '7':
+                configurator = PciPassthruConfigurator()
+                configurator.configure()
+            elif choice == '8':
                 configurator = ResultLogCopier()
                 configurator.configure()
+
         except KeyboardInterrupt:
             print(f"\n\n{Fore.YELLOW}Operation cancelled by user{Style.RESET_ALL}")
         except Exception as e:
